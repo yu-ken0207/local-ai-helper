@@ -18,6 +18,8 @@ const (
 	DefaultAPIPort = 11480
 	// DefaultAdminPort 本機管理頁的連接埠（只聽 127.0.0.1）
 	DefaultAdminPort = 11481
+	// DefaultOllamaURL Ollama 預設的位址
+	DefaultOllamaURL = "http://127.0.0.1:11434"
 	fileName         = "config.json"
 )
 
@@ -34,9 +36,11 @@ type Config struct {
 	// ID 這台小幫手的識別碼；手機用它認出同一台電腦（位址會變）
 	ID string `json:"id"`
 	// Name 顯示在手機上的電腦名稱
-	Name      string   `json:"name"`
-	APIPort   int      `json:"apiPort"`
-	AdminPort int      `json:"adminPort"`
+	Name      string `json:"name"`
+	APIPort   int    `json:"apiPort"`
+	AdminPort int    `json:"adminPort"`
+	// OllamaURL 這台電腦上的 Ollama（小幫手從本機連，Ollama 不用打開網路分享）
+	OllamaURL string   `json:"ollamaUrl"`
 	Devices   []Device `json:"devices"`
 }
 
@@ -78,6 +82,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.AdminPort == 0 {
 		c.AdminPort = DefaultAdminPort
+	}
+	if c.OllamaURL == "" {
+		c.OllamaURL = DefaultOllamaURL
 	}
 	if c.Devices == nil {
 		c.Devices = []Device{}

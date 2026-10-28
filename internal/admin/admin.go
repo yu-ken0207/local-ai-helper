@@ -2,14 +2,18 @@
 package admin
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/gateway"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
 //go:embed page/index.html
@@ -20,7 +24,12 @@ const AppID = "local-ai-helper"
 
 type Server struct {
 	Store   *config.Store
+	Pairing *pairing.Manager
 	Version string
+	// Engines 這台電腦上的 AI 引擎狀態
+	Engines func(ctx context.Context) []gateway.Engine
+	// APIError 手機用的連接埠開不起來時的原因（例如被別的程式佔用）
+	APIError func() string
 	// Quit 管理頁按「結束小幫手」
 	Quit func()
 	// Addrs 目前的區網位址（測試可以換掉）
@@ -28,12 +37,30 @@ type Server struct {
 }
 
 type Status struct {
-	App     string         `json:"app"`
-	Version string         `json:"version"`
-	Name    string         `json:"name"`
-	APIPort int            `json:"apiPort"`
-	Addrs   []netinfo.Addr `json:"addrs"`
-	Devices int            `json:"devices"`
+	App      string           `json:"app"`
+	Version  string           `json:"version"`
+	Name     string           `json:"name"`
+	APIPort  int              `json:"apiPort"`
+	APIError string           `json:"apiError,omitempty"`
+	Addrs    []netinfo.Addr   `json:"addrs"`
+	Devices  []DeviceView     `json:"devices"`
+	Pairing  *PairingView     `json:"pairing,omitempty"`
+	Paired   *DeviceView      `json:"paired,omitempty"`
+	Engines  []gateway.Engine `json:"engines"`
+}
+
+type DeviceView struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	PairedAt   time.Time  `json:"pairedAt"`
+	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
+}
+
+// PairingView 配對時段：配對碼、到期時間、QR code（data URL）
+type PairingView struct {
+	Code      string    `json:"code"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	QR        string    `json:"qr"`
 }
 
 func (s *Server) Handler() http.Handler {
@@ -46,6 +73,21 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /admin/api/status", s.status)
 	mux.HandleFunc("POST /admin/api/name", s.rename)
+	mux.HandleFunc("POST /admin/api/pairing", func(w http.ResponseWriter, r *http.Request) {
+		s.Pairing.Start()
+		s.status(w, r)
+	})
+	mux.HandleFunc("POST /admin/api/pairing/stop", func(w http.ResponseWriter, r *http.Request) {
+		s.Pairing.Stop()
+		s.status(w, r)
+	})
+	mux.HandleFunc("POST /admin/api/devices/{id}/remove", func(w http.ResponseWriter, r *http.Request) {
+		if !s.Pairing.Revoke(r.PathValue("id")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.status(w, r)
+	})
 	mux.HandleFunc("POST /admin/api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
 		if s.Quit != nil {
@@ -57,11 +99,38 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	c := s.Store.Get()
-	addrs := []netinfo.Addr{}
+	st := Status{App: AppID, Version: s.Version, Name: c.Name, APIPort: c.APIPort, Addrs: []netinfo.Addr{}, Devices: []DeviceView{}, Engines: []gateway.Engine{}}
 	if s.Addrs != nil {
-		addrs = append(addrs, s.Addrs()...)
+		st.Addrs = append(st.Addrs, s.Addrs()...)
 	}
-	writeJSON(w, Status{App: AppID, Version: s.Version, Name: c.Name, APIPort: c.APIPort, Addrs: addrs, Devices: len(c.Devices)})
+	if s.APIError != nil {
+		st.APIError = s.APIError()
+	}
+	for _, d := range c.Devices {
+		st.Devices = append(st.Devices, view(d))
+	}
+	if s.Pairing != nil {
+		if w, ok := s.Pairing.Active(); ok {
+			ips := make([]string, 0, len(st.Addrs))
+			for _, a := range st.Addrs {
+				ips = append(ips, a.IP)
+			}
+			qr, _ := pairing.QRDataURL(pairing.Payload(c.ID, c.Name, c.APIPort, w.Code, ips))
+			st.Pairing = &PairingView{Code: w.Code, ExpiresAt: w.ExpiresAt, QR: qr}
+		}
+		if d := s.Pairing.LastPaired(); d != nil {
+			v := view(*d)
+			st.Paired = &v
+		}
+	}
+	if s.Engines != nil {
+		st.Engines = s.Engines(r.Context())
+	}
+	writeJSON(w, st)
+}
+
+func view(d config.Device) DeviceView {
+	return DeviceView{ID: d.ID, Name: d.Name, PairedAt: d.PairedAt, LastSeenAt: d.LastSeenAt}
 }
 
 func (s *Server) rename(w http.ResponseWriter, r *http.Request) {

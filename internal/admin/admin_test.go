@@ -9,6 +9,7 @@ import (
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
 func newServer(t *testing.T) (*Server, http.Handler) {
@@ -17,7 +18,7 @@ func newServer(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Store: store, Version: "test", Addrs: func() []netinfo.Addr { return []netinfo.Addr{{IP: "192.168.1.20", Kind: "lan"}} }}
+	s := &Server{Store: store, Pairing: pairing.New(store), Version: "test", Addrs: func() []netinfo.Addr { return []netinfo.Addr{{IP: "192.168.1.20", Kind: "lan"}} }}
 	return s, s.Handler()
 }
 
@@ -42,7 +43,7 @@ func TestPageAndStatus(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	if st.App != AppID || st.Version != "test" || st.APIPort != config.DefaultAPIPort || len(st.Addrs) != 1 {
+	if st.App != AppID || st.Version != "test" || st.APIPort != config.DefaultAPIPort || len(st.Addrs) != 1 || st.Devices == nil || st.Pairing != nil {
 		t.Fatalf("狀態不對：%+v", st)
 	}
 }
@@ -84,4 +85,48 @@ func TestQuit(t *testing.T) {
 		t.Fatalf("結束 %d", rec.Code)
 	}
 	<-done
+}
+
+func decode(t *testing.T, rec *httptest.ResponseRecorder) Status {
+	t.Helper()
+	var st Status
+	if err := json.NewDecoder(rec.Body).Decode(&st); err != nil {
+		t.Fatalf("%d %v", rec.Code, err)
+	}
+	return st
+}
+
+func TestPairingFromAdminPage(t *testing.T) {
+	s, h := newServer(t)
+	hdr := map[string]string{"X-Local-AI": "1"}
+	st := decode(t, do(h, "POST", "127.0.0.1:11481", "/admin/api/pairing", "", hdr))
+	if st.Pairing == nil || len(st.Pairing.Code) != 6 || !strings.HasPrefix(st.Pairing.QR, "data:image/png;base64,") {
+		t.Fatalf("開始配對要回配對碼與 QR code：%+v", st.Pairing)
+	}
+	// 手機配對成功後，管理頁看得到「已配對」與清單
+	if _, _, err := s.Pairing.Pair(st.Pairing.Code, "媽媽的 iPhone"); err != nil {
+		t.Fatal(err)
+	}
+	st = decode(t, do(h, "GET", "127.0.0.1:11481", "/admin/api/status", "", nil))
+	if st.Pairing != nil || st.Paired == nil || st.Paired.Name != "媽媽的 iPhone" || len(st.Devices) != 1 {
+		t.Fatalf("配對後狀態不對：%+v", st)
+	}
+	// 移除
+	id := st.Devices[0].ID
+	st = decode(t, do(h, "POST", "127.0.0.1:11481", "/admin/api/devices/"+id+"/remove", "", hdr))
+	if len(st.Devices) != 0 {
+		t.Fatal("移除後清單要變空")
+	}
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/devices/"+id+"/remove", "", hdr); rec.Code != http.StatusNotFound {
+		t.Fatalf("移除不存在的手機：%d", rec.Code)
+	}
+	// 取消配對
+	decode(t, do(h, "POST", "127.0.0.1:11481", "/admin/api/pairing", "", hdr))
+	if st := decode(t, do(h, "POST", "127.0.0.1:11481", "/admin/api/pairing/stop", "", hdr)); st.Pairing != nil {
+		t.Fatal("取消後不能再配對")
+	}
+	// 沒帶標頭不能開配對（別的網站不能幫你開）
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/pairing", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("沒帶標頭：%d", rec.Code)
+	}
 }

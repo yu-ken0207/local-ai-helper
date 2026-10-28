@@ -21,7 +21,9 @@ import (
 
 	"github.com/yu-ken0207/local-ai-helper/internal/admin"
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/gateway"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 	"github.com/yu-ken0207/local-ai-helper/internal/platform"
 	"github.com/yu-ken0207/local-ai-helper/internal/tray"
 )
@@ -70,8 +72,38 @@ func main() {
 	quitCh := make(chan struct{})
 	quit := func() { once.Do(func() { close(quitCh) }) }
 
+	pair := pairing.New(store)
+	gw := &gateway.Server{Store: store, Pairing: pair, Version: version, OllamaURL: cfg.OllamaURL}
+
+	// 手機用的門口（聽區網）；開不起來就在管理頁說明原因，管理頁照常可以用
+	var apiErr struct {
+		sync.Mutex
+		msg string
+	}
+	apiSrv := &http.Server{Handler: gw.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if apiLn, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.APIPort)); err != nil {
+		apiErr.msg = err.Error()
+		log.Printf("手機用的連接埠 %d 開不起來：%v", cfg.APIPort, err)
+	} else {
+		go func() {
+			if err := apiSrv.Serve(apiLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				apiErr.Lock()
+				apiErr.msg = err.Error()
+				apiErr.Unlock()
+				log.Printf("手機用的門口停止：%v", err)
+			}
+		}()
+	}
+
 	adminSrv := &http.Server{
-		Handler:           (&admin.Server{Store: store, Version: version, Quit: quit, Addrs: netinfo.LAN}).Handler(),
+		Handler: (&admin.Server{
+			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines,
+			APIError: func() string {
+				apiErr.Lock()
+				defer apiErr.Unlock()
+				return apiErr.msg
+			},
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -109,6 +141,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = adminSrv.Shutdown(ctx)
+	_ = apiSrv.Shutdown(ctx)
 	log.Printf("小幫手結束")
 }
 
