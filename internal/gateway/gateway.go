@@ -14,32 +14,25 @@ import (
 	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
 // AppID hello 回應裡的識別字，App 用它分辨是不是小幫手
 const AppID = "local-ai-helper"
 
-// allowedAPI 手機可以用的 Ollama API；其他（建立、刪除、推送模型…）一律不轉
-var allowedAPI = map[string]bool{
-	"/api/version":  true,
-	"/api/tags":     true,
-	"/api/show":     true,
-	"/api/ps":       true,
-	"/api/chat":     true,
-	"/api/generate": true,
-	"/api/pull":     true,
-}
-
 // maxBody 一次最多收多少（訊息裡的照片是 base64，最多 4 張）
 const maxBody = 64 << 20
 
 type Server struct {
+	proxy   *httputil.ReverseProxy
 	Store   *config.Store
 	Pairing *pairing.Manager
 	Version string
 	// OllamaURL 這台電腦上的 Ollama，例如 http://127.0.0.1:11434
 	OllamaURL string
+	// Registry 其他引擎（LM Studio、OpenAI 格式的伺服器）；nil 就只用 Ollama
+	Registry *engine.Registry
 }
 
 type Hello struct {
@@ -50,18 +43,12 @@ type Hello struct {
 	Pairing bool   `json:"pairing"`
 }
 
-type Engine struct {
-	Kind    string `json:"kind"`
-	OK      bool   `json:"ok"`
-	Version string `json:"version,omitempty"`
-}
-
 type Info struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Version string   `json:"version"`
-	Device  string   `json:"device"`
-	Engines []Engine `json:"engines"`
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	Version string        `json:"version"`
+	Device  string        `json:"device"`
+	Engines []engine.Info `json:"engines"`
 	// Features 手機可以用的功能（不同引擎做得到的不一樣）
 	Features map[string]bool `json:"features"`
 }
@@ -87,18 +74,25 @@ func (s *Server) Handler() http.Handler {
 			writeError(w, http.StatusBadGateway, "engine_unreachable", "Ollama is not running on this computer")
 		},
 	}
+	s.proxy = proxy
+	if s.Registry != nil && s.Registry.Reserved == nil {
+		s.Registry.Reserved = s.ollamaNames
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /helper/v1/hello", s.hello)
 	mux.HandleFunc("POST /helper/v1/pair", s.pair)
 	mux.Handle("GET /helper/v1/info", s.auth(http.HandlerFunc(s.info)))
+	mux.Handle("GET /api/version", s.auth(http.HandlerFunc(s.version)))
+	mux.Handle("GET /api/tags", s.auth(http.HandlerFunc(s.tags)))
+	mux.Handle("POST /api/show", s.auth(s.withBody(s.show)))
+	mux.Handle("GET /api/ps", s.auth(http.HandlerFunc(s.ps)))
+	mux.Handle("POST /api/chat", s.auth(s.withBody(s.chat)))
+	mux.Handle("POST /api/generate", s.auth(s.withBody(s.generate)))
+	mux.Handle("POST /api/pull", s.auth(s.withBody(func(w http.ResponseWriter, r *http.Request, body []byte) { s.toOllama(w, r, body) })))
+	// 其他 Ollama API（刪除、建立、推送模型…）一律不轉
 	mux.Handle("/api/", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !allowedAPI[r.URL.Path] {
-			writeError(w, http.StatusNotFound, "not_allowed", "this API is not available through the helper")
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-		proxy.ServeHTTP(w, r)
+		writeError(w, http.StatusNotFound, "not_allowed", "this API is not available through the helper")
 	})))
 	return mux
 }
@@ -137,22 +131,31 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	c := s.Store.Get()
 	dev, _ := r.Context().Value(deviceKey{}).(config.Device)
-	ollama := s.Engines(r.Context())[0]
-	writeJSON(w, http.StatusOK, Info{
-		ID: c.ID, Name: c.Name, Version: s.Version, Device: dev.Name,
-		Engines:  []Engine{ollama},
-		Features: map[string]bool{"pull": ollama.OK, "preload": ollama.OK},
-	})
+	engines := s.Engines(r.Context())
+	features := map[string]bool{"pull": false, "preload": false}
+	for _, e := range engines {
+		if e.OK && e.Kind == engine.KindOllama {
+			features["pull"], features["preload"] = true, true
+		}
+		if e.OK && e.Kind == engine.KindLMStudio {
+			features["preload"] = true
+		}
+	}
+	writeJSON(w, http.StatusOK, Info{ID: c.ID, Name: c.Name, Version: s.Version, Device: dev.Name, Engines: engines, Features: features})
 }
 
-// Engines 這台電腦上的 AI 引擎狀態（目前只有 Ollama）
-func (s *Server) Engines(ctx context.Context) []Engine {
-	return []Engine{s.ollamaStatus(ctx)}
+// Engines 這台電腦上的 AI 引擎狀態：Ollama（一定列出，沒開也列，讓使用者知道要開）＋偵測到的其他引擎
+func (s *Server) Engines(ctx context.Context) []engine.Info {
+	out := []engine.Info{s.ollamaStatus(ctx)}
+	if s.Registry != nil {
+		out = append(out, s.Registry.Infos(ctx)...)
+	}
+	return out
 }
 
 // ollamaStatus 問 Ollama 的版本，問得到就是開著
-func (s *Server) ollamaStatus(ctx context.Context) Engine {
-	e := Engine{Kind: "ollama"}
+func (s *Server) ollamaStatus(ctx context.Context) engine.Info {
+	e := engine.Info{ID: engine.KindOllama, Kind: engine.KindOllama, Name: "Ollama", URL: s.OllamaURL}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.OllamaURL, "/")+"/api/version", nil)

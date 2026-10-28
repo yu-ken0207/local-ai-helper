@@ -88,6 +88,20 @@
   <section>
     <h2 data-t="engines"></h2>
     <div id="engines">…</div>
+    <p class="hint" data-t="enginesHint"></p>
+    <div class="row" id="engineActions">
+      <button class="link" id="addServerBtn" data-t="addServer"></button>
+      <button class="link" id="redetectBtn" data-t="redetect"></button>
+    </div>
+    <form id="serverForm" hidden>
+      <div class="row"><input id="serverUrl" placeholder="http://127.0.0.1:8080" required></div>
+      <div class="row" style="margin-top:8px"><input id="serverName" maxlength="40"><input id="serverKey" type="password" autocomplete="off"></div>
+      <div class="row" style="margin-top:8px">
+        <button type="submit" data-t="add"></button>
+        <button type="button" id="cancelServer" data-t="cancel"></button>
+        <span id="serverError" class="error"></span>
+      </div>
+    </form>
   </section>
 
   <section>
@@ -140,7 +154,19 @@ const T = zh ? {
   engines: 'AI 引擎',
   ollamaOk: (v) => `Ollama ${v}・運作中`,
   ollamaMissing: '找不到 Ollama。請先下載安裝並打開 Ollama，手機才有模型可以用。',
+  ollamaOff: 'Ollama：沒有開（目前用其他引擎）',
   download: '下載 Ollama',
+  running: (n) => `運作中・${n} 個模型`,
+  unreachable: '連不到',
+  openaiCompat: 'OpenAI 相容伺服器',
+  enginesHint: '會自動找 LM Studio，以及 llama.cpp、vLLM、Jan、GPT4All 的常見連接埠。手機上會看到所有引擎的模型。',
+  addServer: '新增其他伺服器',
+  redetect: '重新尋找',
+  add: '新增',
+  serverNamePh: '名稱（可以不填）',
+  serverKeyPh: 'API 金鑰（需要時才填）',
+  badUrl: '網址格式不對，例如 http://127.0.0.1:8080',
+  removeServer: (n) => `移除「${n}」？`,
   computer: '這台電腦',
   rename: '改名',
   save: '儲存',
@@ -173,10 +199,22 @@ const T = zh ? {
   justNow: 'just now',
   minutesAgo: (n) => `${n} min ago`,
   hoursAgo: (n) => `${n} hr ago`,
-  engines: 'AI engine',
+  engines: 'AI engines',
   ollamaOk: (v) => `Ollama ${v} · Running`,
   ollamaMissing: "Ollama isn't running. Download, install, and open Ollama so phones have models to use.",
+  ollamaOff: 'Ollama: not running (using other engines)',
   download: 'Download Ollama',
+  running: (n) => `Running · ${n} models`,
+  unreachable: "Can't connect",
+  openaiCompat: 'OpenAI-compatible server',
+  enginesHint: 'LM Studio is found automatically, as are the usual ports for llama.cpp, vLLM, Jan, and GPT4All. Phones see the models from every engine.',
+  addServer: 'Add Another Server',
+  redetect: 'Search Again',
+  add: 'Add',
+  serverNamePh: 'Name (optional)',
+  serverKeyPh: 'API key (only if needed)',
+  badUrl: 'Invalid address, e.g. http://127.0.0.1:8080',
+  removeServer: (n) => `Remove "${n}"?`,
   computer: 'This computer',
   rename: 'Rename',
   save: 'Save',
@@ -255,6 +293,7 @@ function render(st) {
   // AI 引擎
   const engines = $('engines');
   engines.replaceChildren();
+  const othersOk = st.engines.some((e) => e.kind !== 'ollama' && e.ok);
   for (const e of st.engines) {
     const row = document.createElement('div');
     row.className = 'row';
@@ -262,15 +301,29 @@ function render(st) {
     dot.className = e.ok ? 'dot' : 'dot off';
     const text = document.createElement('span');
     text.className = 'grow';
-    text.textContent = e.ok ? T.ollamaOk(e.version) : T.ollamaMissing;
+    const host = (e.url || '').replace(/^https?:\/\//, '');
+    const name = e.name || `${T.openaiCompat}（${host}）`;
+    if (e.kind === 'ollama') text.textContent = e.ok ? T.ollamaOk(e.version) : othersOk ? T.ollamaOff : T.ollamaMissing;
+    else text.textContent = `${name}・${e.ok ? T.running(e.models) : T.unreachable}`;
     row.append(dot, text);
-    if (!e.ok) {
+    if (e.kind === 'ollama' && !e.ok && !othersOk) {
       const a = document.createElement('a');
       a.href = 'https://ollama.com/download';
       a.target = '_blank';
       a.rel = 'noopener';
       a.textContent = T.download;
       row.append(a);
+    }
+    if (e.added) {
+      const rm = document.createElement('button');
+      rm.className = 'danger';
+      rm.textContent = T.remove;
+      rm.onclick = async () => {
+        if (!confirm(T.removeServer(name))) return;
+        const next = await post(`/admin/api/servers/${encodeURIComponent(e.id.replace(/^server:/, ''))}/remove`);
+        if (next) render(next);
+      };
+      row.append(rm);
     }
     engines.append(row);
   }
@@ -311,6 +364,24 @@ async function refresh() {
   }
 }
 
+$('serverName').placeholder = T.serverNamePh;
+$('serverKey').placeholder = T.serverKeyPh;
+$('addServerBtn').onclick = () => { $('serverForm').hidden = false; $('engineActions').hidden = true; $('serverUrl').focus(); };
+$('cancelServer').onclick = () => { $('serverForm').hidden = true; $('engineActions').hidden = false; $('serverError').textContent = ''; };
+$('serverForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const next = await post('/admin/api/servers', { url: $('serverUrl').value, name: $('serverName').value, apiKey: $('serverKey').value });
+  if (!next) { $('serverError').textContent = T.badUrl; return; }
+  $('serverForm').reset();
+  $('serverForm').hidden = true;
+  $('engineActions').hidden = false;
+  $('serverError').textContent = '';
+  render(next);
+};
+$('redetectBtn').onclick = async () => {
+  const next = await post('/admin/api/engines/redetect');
+  if (next) render(next);
+};
 $('startPairing').onclick = async () => {
   const st = await post('/admin/api/pairing');
   if (st) render(st);

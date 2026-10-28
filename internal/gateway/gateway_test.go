@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine/enginetest"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
@@ -210,7 +212,129 @@ func TestInfoAndOllamaDown(t *testing.T) {
 	if info.Engines[0].OK || info.Features["pull"] {
 		t.Fatalf("Ollama 關掉要標成不能用：%+v", info)
 	}
-	if rec := call(h, "GET", "/api/tags", token, ""); rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "engine_unreachable") {
-		t.Fatalf("Ollama 關掉時：%d %s", rec.Code, rec.Body)
+	// 一個引擎都沒有：模型清單說清楚；聊天轉給 Ollama 失敗也說清楚
+	if rec := call(h, "GET", "/api/tags", token, ""); rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "no_engine") {
+		t.Fatalf("沒有引擎時：%d %s", rec.Code, rec.Body)
 	}
+	if rec := call(h, "POST", "/api/chat", token, `{"model":"gemma4:12b"}`); rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "engine_unreachable") {
+		t.Fatalf("Ollama 關掉時聊天：%d %s", rec.Code, rec.Body)
+	}
+}
+
+// 有 LM Studio 時：模型清單合在一起，聊天依模型轉給對的引擎
+func setupWithLMStudio(t *testing.T, ollamaURL string) (*Server, http.Handler, *enginetest.Fake, string) {
+	t.Helper()
+	lm := &enginetest.Fake{Models: []enginetest.FakeModel{
+		{Key: "google/gemma-3-12b", Vision: true, Loaded: true},
+		{Key: "openai/gpt-oss-20b", Reasoning: []string{"low", "medium", "high"}},
+		{Key: "gemma4:12b"},
+	}}
+	lmSrv := httptest.NewServer(lm)
+	t.Cleanup(lmSrv.Close)
+	s, _ := setup(t, ollamaURL)
+	s.Registry = &engine.Registry{LMStudio: &engine.LMStudio{BaseURL: lmSrv.URL}, DetectPorts: []int{}}
+	h := s.Handler()
+	return s, h, lm, pairPhone(t, s, h)
+}
+
+func TestTagsMergeEngines(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, _, token := setupWithLMStudio(t, ollama.URL)
+	rec := call(h, "GET", "/api/tags", token, "")
+	var out struct {
+		Models []struct {
+			Name   string `json:"name"`
+			Engine string `json:"engine"`
+		} `json:"models"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&out)
+	got := []string{}
+	for _, m := range out.Models {
+		got = append(got, m.Name+"|"+m.Engine)
+	}
+	// Ollama 也有 gemma4:12b：LM Studio 那個加上 @lmstudio
+	if want := "gemma4:12b|ollama,google/gemma-3-12b|lmstudio,openai/gpt-oss-20b|lmstudio,gemma4:12b@lmstudio|lmstudio"; strings.Join(got, ",") != want {
+		t.Fatalf("模型清單 %v", got)
+	}
+}
+
+func TestShowForLMStudioModel(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, _, token := setupWithLMStudio(t, ollama.URL)
+	var show struct {
+		Capabilities []string       `json:"capabilities"`
+		ModelInfo    map[string]any `json:"model_info"`
+		Thinking     struct {
+			Values []string `json:"values"`
+		} `json:"thinking"`
+	}
+	_ = json.NewDecoder(call(h, "POST", "/api/show", token, `{"model":"google/gemma-3-12b"}`).Body).Decode(&show)
+	if strings.Join(show.Capabilities, ",") != "completion,vision" || show.ModelInfo["lmstudio.context_length"] != float64(32768) {
+		t.Fatalf("看圖模型：%+v", show)
+	}
+	_ = json.NewDecoder(call(h, "POST", "/api/show", token, `{"model":"openai/gpt-oss-20b"}`).Body).Decode(&show)
+	if !strings.Contains(strings.Join(show.Capabilities, ","), "thinking") || strings.Join(show.Thinking.Values, ",") != "low,medium,high" {
+		t.Fatalf("推理模型：%+v", show)
+	}
+}
+
+func TestChatRoutesToLMStudio(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, lm, token := setupWithLMStudio(t, ollama.URL)
+	rec := call(h, "POST", "/api/chat", token, `{"model":"gemma4:12b@lmstudio","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != 200 || len(lm.Requests) != 1 || lm.Requests[0]["model"] != "gemma4:12b" {
+		t.Fatalf("要用原本的名稱轉給 LM Studio：%d %v", rec.Code, lm.Requests)
+	}
+	// 回答裡的模型名稱換回手機看到的名稱
+	if !strings.Contains(rec.Body.String(), `"model":"gemma4:12b@lmstudio"`) || !strings.Contains(rec.Body.String(), `"done":true`) {
+		t.Fatalf("回答：%s", rec.Body)
+	}
+	// Ollama 的模型還是給 Ollama
+	if rec := call(h, "POST", "/api/chat", token, `{"model":"gemma4:12b","messages":[]}`); !strings.Contains(rec.Body.String(), "你") || len(lm.Requests) != 1 {
+		t.Fatalf("Ollama 的模型：%s", rec.Body)
+	}
+}
+
+func TestPreloadUnloadAndPs(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, lm, token := setupWithLMStudio(t, ollama.URL)
+	if rec := call(h, "POST", "/api/generate", token, `{"model":"openai/gpt-oss-20b","keep_alive":"30m"}`); rec.Code != 200 {
+		t.Fatalf("預先載入：%d %s", rec.Code, rec.Body)
+	}
+	if rec := call(h, "POST", "/api/generate", token, `{"model":"google/gemma-3-12b","keep_alive":0}`); rec.Code != 200 {
+		t.Fatalf("卸載：%d %s", rec.Code, rec.Body)
+	}
+	if strings.Join(lm.Loads, ",") != "openai/gpt-oss-20b" || strings.Join(lm.Unloads, ",") != "google/gemma-3-12b" {
+		t.Fatalf("載入 %v 卸載 %v", lm.Loads, lm.Unloads)
+	}
+	var ps struct {
+		Models []struct {
+			Name          string `json:"name"`
+			ContextLength int    `json:"context_length"`
+		} `json:"models"`
+	}
+	_ = json.NewDecoder(call(h, "GET", "/api/ps", token, "").Body).Decode(&ps)
+	if len(ps.Models) != 1 || ps.Models[0].Name != "google/gemma-3-12b" || ps.Models[0].ContextLength != 8192 {
+		t.Fatalf("已載入：%+v", ps.Models)
+	}
+}
+
+func TestWorksWithoutOllama(t *testing.T) {
+	s, h, _, token := setupWithLMStudio(t, "http://127.0.0.1:1")
+	if rec := call(h, "GET", "/api/tags", token, ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "google/gemma-3-12b") {
+		t.Fatalf("沒有 Ollama 也要列 LM Studio 的模型：%d %s", rec.Code, rec.Body)
+	}
+	if rec := call(h, "GET", "/api/version", token, ""); !strings.Contains(rec.Body.String(), `"version":"test"`) {
+		t.Fatalf("沒有 Ollama 時回小幫手的版本：%s", rec.Body)
+	}
+	var info Info
+	_ = json.NewDecoder(call(h, "GET", "/helper/v1/info", token, "").Body).Decode(&info)
+	if len(info.Engines) != 2 || info.Engines[0].OK || !info.Engines[1].OK || info.Features["pull"] || !info.Features["preload"] {
+		t.Fatalf("info：%+v", info)
+	}
+	_ = s
 }

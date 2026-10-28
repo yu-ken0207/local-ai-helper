@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
-	"github.com/yu-ken0207/local-ai-helper/internal/gateway"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
@@ -27,7 +29,9 @@ type Server struct {
 	Pairing *pairing.Manager
 	Version string
 	// Engines 這台電腦上的 AI 引擎狀態
-	Engines func(ctx context.Context) []gateway.Engine
+	Engines func(ctx context.Context) []engine.Info
+	// Redetect 重新尋找引擎（管理頁按「重新尋找」）
+	Redetect func()
 	// APIError 手機用的連接埠開不起來時的原因（例如被別的程式佔用）
 	APIError func() string
 	// Quit 管理頁按「結束小幫手」
@@ -37,16 +41,16 @@ type Server struct {
 }
 
 type Status struct {
-	App      string           `json:"app"`
-	Version  string           `json:"version"`
-	Name     string           `json:"name"`
-	APIPort  int              `json:"apiPort"`
-	APIError string           `json:"apiError,omitempty"`
-	Addrs    []netinfo.Addr   `json:"addrs"`
-	Devices  []DeviceView     `json:"devices"`
-	Pairing  *PairingView     `json:"pairing,omitempty"`
-	Paired   *DeviceView      `json:"paired,omitempty"`
-	Engines  []gateway.Engine `json:"engines"`
+	App      string         `json:"app"`
+	Version  string         `json:"version"`
+	Name     string         `json:"name"`
+	APIPort  int            `json:"apiPort"`
+	APIError string         `json:"apiError,omitempty"`
+	Addrs    []netinfo.Addr `json:"addrs"`
+	Devices  []DeviceView   `json:"devices"`
+	Pairing  *PairingView   `json:"pairing,omitempty"`
+	Paired   *DeviceView    `json:"paired,omitempty"`
+	Engines  []engine.Info  `json:"engines"`
 }
 
 type DeviceView struct {
@@ -88,6 +92,32 @@ func (s *Server) Handler() http.Handler {
 		}
 		s.status(w, r)
 	})
+	mux.HandleFunc("POST /admin/api/servers", s.addServer)
+	mux.HandleFunc("POST /admin/api/servers/{id}/remove", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		found := false
+		_ = s.Store.Update(func(c *config.Config) {
+			kept := c.Servers[:0]
+			for _, sv := range c.Servers {
+				if sv.ID == id {
+					found = true
+					continue
+				}
+				kept = append(kept, sv)
+			}
+			c.Servers = kept
+		})
+		if !found {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.redetect()
+		s.status(w, r)
+	})
+	mux.HandleFunc("POST /admin/api/engines/redetect", func(w http.ResponseWriter, r *http.Request) {
+		s.redetect()
+		s.status(w, r)
+	})
 	mux.HandleFunc("POST /admin/api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
 		if s.Quit != nil {
@@ -99,7 +129,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	c := s.Store.Get()
-	st := Status{App: AppID, Version: s.Version, Name: c.Name, APIPort: c.APIPort, Addrs: []netinfo.Addr{}, Devices: []DeviceView{}, Engines: []gateway.Engine{}}
+	st := Status{App: AppID, Version: s.Version, Name: c.Name, APIPort: c.APIPort, Addrs: []netinfo.Addr{}, Devices: []DeviceView{}, Engines: []engine.Info{}}
 	if s.Addrs != nil {
 		st.Addrs = append(st.Addrs, s.Addrs()...)
 	}
@@ -127,6 +157,54 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		st.Engines = s.Engines(r.Context())
 	}
 	writeJSON(w, st)
+}
+
+func (s *Server) redetect() {
+	if s.Redetect != nil {
+		s.Redetect()
+	}
+}
+
+// addServer 加一台 OpenAI 格式的伺服器：網址要是 http(s)://主機:連接埠
+func (s *Server) addServer(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name   string `json:"name"`
+		URL    string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	u, ok := normalizeServerURL(body.URL)
+	if !ok || len([]rune(body.Name)) > 40 {
+		http.Error(w, "bad url", http.StatusBadRequest)
+		return
+	}
+	if err := s.Store.Update(func(c *config.Config) {
+		c.Servers = append(c.Servers, config.Server{ID: config.NewID(6), Name: strings.TrimSpace(body.Name), URL: u, APIKey: strings.TrimSpace(body.APIKey)})
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.redetect()
+	s.status(w, r)
+}
+
+// normalizeServerURL 「127.0.0.1:8080」「http://127.0.0.1:8080/v1/」都整理成 http://127.0.0.1:8080
+func normalizeServerURL(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", false
+	}
+	return u.Scheme + "://" + u.Host, true
 }
 
 func view(d config.Device) DeviceView {

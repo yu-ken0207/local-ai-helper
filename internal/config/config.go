@@ -20,7 +20,9 @@ const (
 	DefaultAdminPort = 11481
 	// DefaultOllamaURL Ollama 預設的位址
 	DefaultOllamaURL = "http://127.0.0.1:11434"
-	fileName         = "config.json"
+	// DefaultLMStudioURL LM Studio 伺服器預設的位址
+	DefaultLMStudioURL = "http://127.0.0.1:1234"
+	fileName           = "config.json"
 )
 
 // Device 一支配對過的手機。權杖只存雜湊，設定檔外洩也拿不到權杖本身。
@@ -40,8 +42,21 @@ type Config struct {
 	APIPort   int    `json:"apiPort"`
 	AdminPort int    `json:"adminPort"`
 	// OllamaURL 這台電腦上的 Ollama（小幫手從本機連，Ollama 不用打開網路分享）
-	OllamaURL string   `json:"ollamaUrl"`
-	Devices   []Device `json:"devices"`
+	OllamaURL string `json:"ollamaUrl"`
+	// LMStudioURL LM Studio 的伺服器；LMStudioToken 有開「需要 API 金鑰」時填
+	LMStudioURL   string `json:"lmstudioUrl"`
+	LMStudioToken string `json:"lmstudioToken,omitempty"`
+	// Servers 使用者自己加的 OpenAI 格式伺服器
+	Servers []Server `json:"servers"`
+	Devices []Device `json:"devices"`
+}
+
+// Server 使用者在管理頁加的 OpenAI 格式伺服器（llama.cpp、vLLM…）
+type Server struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	APIKey string `json:"apiKey,omitempty"`
 }
 
 // Dir 設定資料夾
@@ -86,6 +101,12 @@ func (c *Config) fillDefaults() {
 	if c.OllamaURL == "" {
 		c.OllamaURL = DefaultOllamaURL
 	}
+	if c.LMStudioURL == "" {
+		c.LMStudioURL = DefaultLMStudioURL
+	}
+	if c.Servers == nil {
+		c.Servers = []Server{}
+	}
 	if c.Devices == nil {
 		c.Devices = []Device{}
 	}
@@ -124,6 +145,7 @@ func (s *Store) Get() Config {
 	defer s.mu.Unlock()
 	c := s.cfg
 	c.Devices = append([]Device{}, s.cfg.Devices...)
+	c.Servers = append([]Server{}, s.cfg.Servers...)
 	return c
 }
 
@@ -133,6 +155,7 @@ func (s *Store) Update(fn func(c *Config)) error {
 	defer s.mu.Unlock()
 	before := s.cfg
 	before.Devices = append([]Device(nil), s.cfg.Devices...)
+	before.Servers = append([]Server(nil), s.cfg.Servers...)
 	fn(&s.cfg)
 	if err := s.save(); err != nil {
 		s.cfg = before

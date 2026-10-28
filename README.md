@@ -11,6 +11,8 @@
 ## 設計
 
 - 手機只跟小幫手講話（要帶配對時拿到的權杖），小幫手再接後面的引擎：Ollama（預設，沒有就自動安裝）、LM Studio、OpenAI 格式的伺服器（llama.cpp、vLLM、Jan…）
+- 引擎：Ollama 原樣轉送；LM Studio 用原生 API 列模型（0.4 起 `/api/v1/models`，舊版 `/api/v0/models`）與載入／卸載，聊天走 OpenAI 格式；其他 OpenAI 格式伺服器在常見連接埠（8080、8000、1337、4891、5000）自動偵測（看 `/v1/models` 的格式與 `owned_by`），也可以在管理頁手動加（網址、名稱、API 金鑰）
+- 模型清單合併所有引擎，每個模型多一個 `engine` 欄位；跟 Ollama 撞名的改叫「名稱@引擎」（Ollama 的名稱永遠不變）；聊天時依名稱找回引擎，OpenAI 的串流（含 `reasoning_content`、用量）翻回 Ollama 的逐行格式；圖片轉成 `image_url`
 - 小幫手對手機說 Ollama 的格式；引擎維持只給本機用，不用打開網路分享
 - 兩個連接埠：11480 給手機（區網）、11481 是管理頁（只聽 127.0.0.1）
 - 管理頁擋 DNS rebinding（主機名稱一定要是 127.0.0.1／localhost）與跨網站送出（會改東西的請求要帶 `X-Local-AI: 1`）
@@ -25,7 +27,7 @@
 | `GET /helper/v1/hello` | 不用 | `{app:"local-ai-helper", id, name, version, pairing}`；App 掃區網時用來認出小幫手 |
 | `POST /helper/v1/pair` | 不用 | `{code, deviceName}` 換 `{token, deviceId, helper:{id,name}}`；錯誤代碼 `not_pairing`（409）、`bad_code`（403）、`too_many_attempts`（429，打錯 5 次時段就關掉） |
 | `GET /helper/v1/info` | 要 | 電腦名稱、引擎狀態 `engines[]`、可用功能 `features`（`pull`、`preload`） |
-| `/api/version` `tags` `show` `ps` `chat` `generate` `pull` | 要 | 轉給 Ollama（邊收邊送）；其他 Ollama API（刪除、建立、推送模型）不開放，回 404 `not_allowed`；Ollama 沒開回 502 `engine_unreachable` |
+| `/api/version` `tags` `show` `ps` `chat` `generate` `pull` | 要 | Ollama 格式；依模型轉給對的引擎（邊收邊送）。`tags` 合併所有引擎；`generate` 只用來預先載入（`keep_alive`）與卸載（`keep_alive: 0`），OpenAI 格式伺服器回 501 `unsupported`；`pull` 只有 Ollama。其他 Ollama API（刪除、建立、推送）回 404 `not_allowed`；一個引擎都沒有回 502 `no_engine` |
 
 - 權杖放在 `Authorization: Bearer ...`；沒帶或被移除回 401 `not_paired`（App 要請使用者重新配對）
 - QR code 內容：`localai://pair?v=1&id=...&name=...&port=11480&code=123456&ip=192.168.1.20&ip=...`（App 依序試每個位址的 hello，識別碼要對）
@@ -44,7 +46,8 @@ scripts/build.sh          # dist/ 下產生 windows-amd64.exe、linux-amd64、li
 cmd/local-ai-helper/   進入點：只開一個、開管理頁、系統匣、結束
 internal/config/       設定檔（識別碼、名稱、連接埠、已配對的手機）
 internal/admin/        本機管理頁與 API（page/index.html 內嵌，中英文跟著瀏覽器）
-internal/gateway/      手機連的門口：hello、配對、權杖檢查、轉給 Ollama
+internal/gateway/      手機連的門口：hello、配對、權杖檢查、依模型轉給對的引擎
+internal/engine/       LM Studio、OpenAI 格式伺服器：偵測、模型清單、聊天翻譯、載入／卸載（enginetest/ 是假引擎）
 internal/pairing/      配對時段、配對碼、權杖（只存雜湊）、QR code
 internal/netinfo/      找手機連得到的位址（排除 Docker、WSL 等虛擬網卡）
 internal/platform/     開瀏覽器、介面語言、有沒有桌面
@@ -58,7 +61,7 @@ internal/tray/         系統匣圖示
 | 1 | 骨架：管理頁、設定檔、系統匣、Windows／Linux 執行檔 | 完成（Linux 實測過；Windows 待測試機） |
 | 2 | 配對（QR code＋6 位數配對碼）與門口，先接 Ollama | 完成（Linux 實機測試：配對、聊天串流、從另一台 Windows 電腦經 Tailscale 連入） |
 | 3 | App：掃 QR code 配對、找小幫手、輸入配對碼 | 完成（local-chat） |
-| 4 | 接 LM Studio 與 OpenAI 格式的伺服器 | |
+| 4 | 接 LM Studio 與 OpenAI 格式的伺服器 | 完成（Linux 實機測試 LM Studio 0.4 llmster：合併清單、看圖聊天、載入／卸載） |
 | 5 | App：依引擎隱藏做不到的功能、在手機下載模型與推薦 | |
 | 6 | 一鍵安裝 Ollama、偵測硬體 | |
 | 7 | 開機自動啟動、使用中不睡眠、防火牆 | |

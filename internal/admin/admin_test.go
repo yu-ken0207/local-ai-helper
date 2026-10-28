@@ -130,3 +130,32 @@ func TestPairingFromAdminPage(t *testing.T) {
 		t.Fatalf("沒帶標頭：%d", rec.Code)
 	}
 }
+
+func TestAddAndRemoveServer(t *testing.T) {
+	s, h := newServer(t)
+	redetected := 0
+	s.Redetect = func() { redetected++ }
+	hdr := map[string]string{"X-Local-AI": "1"}
+	for _, bad := range []string{`{"url":""}`, `{"url":"ftp://x:21"}`, `{"url":"http://"}`, `壞掉`} {
+		if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/servers", bad, hdr); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s 應該被拒絕：%d", bad, rec.Code)
+		}
+	}
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/servers", `{"url":"127.0.0.1:8080/v1/","name":"llama","apiKey":" k "}`, hdr); rec.Code != 200 {
+		t.Fatalf("新增：%d", rec.Code)
+	}
+	servers := s.Store.Get().Servers
+	if len(servers) != 1 || servers[0].URL != "http://127.0.0.1:8080" || servers[0].Name != "llama" || servers[0].APIKey != "k" || redetected != 1 {
+		t.Fatalf("網址要整理好：%+v", servers)
+	}
+	// 狀態裡不能看到金鑰
+	if rec := do(h, "GET", "127.0.0.1:11481", "/admin/api/status", "", nil); strings.Contains(rec.Body.String(), `"k"`) {
+		t.Fatal("金鑰不能出現在狀態裡")
+	}
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/servers/"+servers[0].ID+"/remove", "", hdr); rec.Code != 200 || len(s.Store.Get().Servers) != 0 {
+		t.Fatalf("移除：%d", rec.Code)
+	}
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/servers/nope/remove", "", hdr); rec.Code != http.StatusNotFound {
+		t.Fatalf("移除不存在的：%d", rec.Code)
+	}
+}

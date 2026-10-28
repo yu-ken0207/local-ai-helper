@@ -21,6 +21,7 @@ import (
 
 	"github.com/yu-ken0207/local-ai-helper/internal/admin"
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/gateway"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
@@ -73,7 +74,17 @@ func main() {
 	quit := func() { once.Do(func() { close(quitCh) }) }
 
 	pair := pairing.New(store)
-	gw := &gateway.Server{Store: store, Pairing: pair, Version: version, OllamaURL: cfg.OllamaURL}
+	registry := &engine.Registry{
+		LMStudio: &engine.LMStudio{BaseURL: cfg.LMStudioURL, APIKey: cfg.LMStudioToken},
+		Servers: func() []engine.Server {
+			out := []engine.Server{}
+			for _, sv := range store.Get().Servers {
+				out = append(out, engine.Server{ID: sv.ID, Name: sv.Name, URL: sv.URL, APIKey: sv.APIKey})
+			}
+			return out
+		},
+	}
+	gw := &gateway.Server{Store: store, Pairing: pair, Version: version, OllamaURL: cfg.OllamaURL, Registry: registry}
 
 	// 手機用的門口（聽區網）；開不起來就在管理頁說明原因，管理頁照常可以用
 	var apiErr struct {
@@ -97,7 +108,7 @@ func main() {
 
 	adminSrv := &http.Server{
 		Handler: (&admin.Server{
-			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines,
+			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines, Redetect: registry.Redetect,
 			APIError: func() string {
 				apiErr.Lock()
 				defer apiErr.Unlock()
