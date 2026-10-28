@@ -57,7 +57,7 @@ internal/tray/         系統匣圖示
 |---|---|---|
 | 1 | 骨架：管理頁、設定檔、系統匣、Windows／Linux 執行檔 | 完成（Linux 實測過；Windows 待測試機） |
 | 2 | 配對（QR code＋6 位數配對碼）與門口，先接 Ollama | 完成（Linux 實機測試：配對、聊天串流、從另一台 Windows 電腦經 Tailscale 連入） |
-| 3 | App：掃 QR code 配對、找小幫手、輸入配對碼 | |
+| 3 | App：掃 QR code 配對、找小幫手、輸入配對碼 | 完成（local-chat） |
 | 4 | 接 LM Studio 與 OpenAI 格式的伺服器 | |
 | 5 | App：依引擎隱藏做不到的功能、在手機下載模型與推薦 | |
 | 6 | 一鍵安裝 Ollama、偵測硬體 | |
