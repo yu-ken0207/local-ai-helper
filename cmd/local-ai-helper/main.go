@@ -1,0 +1,153 @@
+// Local AI 小幫手：讓家裡的手機用這台電腦上的 AI 模型。
+// 點兩下打開：開一個只有本機看得到的管理頁，系統匣放一個圖示；已經開著就只把管理頁叫出來。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/yu-ken0207/local-ai-helper/internal/admin"
+	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/platform"
+	"github.com/yu-ken0207/local-ai-helper/internal/tray"
+)
+
+// version 編譯時用 -ldflags "-X main.version=..." 填入
+var version = "dev"
+
+func main() {
+	noBrowser := flag.Bool("no-browser", false, "啟動時不打開管理頁")
+	noTray := flag.Bool("no-tray", false, "不放系統匣圖示（沒有桌面的電腦）")
+	configDir := flag.String("config-dir", "", "設定資料夾（預設是使用者的設定資料夾）")
+	flag.Parse()
+
+	dir := *configDir
+	if dir == "" {
+		d, err := config.Dir()
+		if err != nil {
+			fatal(err)
+		}
+		dir = d
+	}
+	setupLog(dir)
+
+	store, err := config.Open(dir)
+	if err != nil {
+		fatal(fmt.Errorf("讀不到設定：%w", err))
+	}
+	cfg := store.Get()
+	adminURL := admin.URL(cfg.AdminPort)
+	showPage := !*noBrowser && platform.HasDesktop()
+
+	// 只開一個：連接埠已經被自己佔住，就把管理頁叫出來後結束
+	adminLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort))
+	if err != nil {
+		if alreadyRunning(adminURL) {
+			log.Printf("小幫手已經在執行，打開管理頁")
+			if showPage {
+				_ = platform.OpenBrowser(adminURL)
+			}
+			return
+		}
+		fatal(fmt.Errorf("連接埠 %d 被別的程式佔用：%w", cfg.AdminPort, err))
+	}
+
+	var once sync.Once
+	quitCh := make(chan struct{})
+	quit := func() { once.Do(func() { close(quitCh) }) }
+
+	adminSrv := &http.Server{
+		Handler:           (&admin.Server{Store: store, Version: version, Quit: quit, Addrs: netinfo.LAN}).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("管理頁停止：%v", err)
+			quit()
+		}
+	}()
+	log.Printf("小幫手 %s 啟動，管理頁 %s，設定 %s", version, adminURL, dir)
+
+	if showPage {
+		if err := platform.OpenBrowser(adminURL); err != nil {
+			log.Printf("打不開瀏覽器：%v", err)
+		}
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		quit()
+	}()
+
+	if !*noTray && platform.HasDesktop() {
+		go func() {
+			<-quitCh
+			tray.Quit()
+		}()
+		tray.Run(trayLabels(), func() { _ = platform.OpenBrowser(adminURL) }, quit)
+		quit()
+	} else {
+		<-quitCh
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = adminSrv.Shutdown(ctx)
+	log.Printf("小幫手結束")
+}
+
+// alreadyRunning 佔住連接埠的是不是另一個小幫手
+func alreadyRunning(url string) bool {
+	c := http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get(url + "admin/api/status")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var s admin.Status
+	return json.NewDecoder(resp.Body).Decode(&s) == nil && s.App == admin.AppID
+}
+
+func trayLabels() tray.Labels {
+	if platform.Chinese() {
+		return tray.Labels{Tooltip: "Local AI 小幫手", Open: "打開小幫手", Quit: "結束小幫手"}
+	}
+	return tray.Labels{Tooltip: "Local AI Helper", Open: "Open Helper", Quit: "Quit Helper"}
+}
+
+// setupLog 記錄寫到設定資料夾的 helper.log（Windows 版沒有命令列視窗）；超過 5 MB 就從頭寫
+func setupLog(dir string) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	path := filepath.Join(dir, "helper.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > 5<<20 {
+		_ = os.Remove(path)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+}
+
+func fatal(err error) {
+	log.Printf("無法啟動：%v", err)
+	os.Exit(1)
+}

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local AI 小幫手</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --text: #1d1d1f; --dim: #6e6e73; --line: #e3e1dc;
+    --accent: #c96442; --accent-text: #ffffff; --ok: #2f9e5b; --danger: #c0392b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141414; --card: #1f1f1f; --text: #f2f2f2; --dim: #9a9a9f; --line: #2e2e2e; --accent: #e0896b; --accent-text: #1a1a1a; --ok: #4cc27a; --danger: #ff6b5b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "Noto Sans TC", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font: 700 22px/1.3 var(--mono); margin: 0 0 4px; }
+  h1 .mark { color: var(--accent); }
+  .sub { color: var(--dim); margin: 0 0 24px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  h2 { font-size: 13px; font-weight: 600; color: var(--dim); margin: 0 0 8px; letter-spacing: .02em; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); flex: none; }
+  .name { font-weight: 600; font-size: 17px; }
+  .addr { font: 14px/1.8 var(--mono); }
+  .tag { font-size: 12px; color: var(--dim); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; margin-left: 6px; }
+  .hint { color: var(--dim); font-size: 13px; margin: 8px 0 0; }
+  button { font: inherit; border-radius: 10px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--text); }
+  button:hover { border-color: var(--dim); }
+  button.link { border: none; padding: 0; color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--danger); }
+  input { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0; flex: 1; }
+  .error { color: var(--danger); }
+  footer { margin-top: 24px; display: flex; justify-content: space-between; align-items: center; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="mark">◆</span> <span data-t="title"></span></h1>
+  <p class="sub" data-t="subtitle"></p>
+
+  <section>
+    <h2 data-t="computer"></h2>
+    <div class="row" id="nameView">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="name" id="name">…</span>
+      <button class="link" id="renameBtn" data-t="rename"></button>
+    </div>
+    <form class="row" id="nameEdit" hidden>
+      <input id="nameInput" maxlength="40" required>
+      <button type="submit" data-t="save"></button>
+      <button type="button" id="cancelRename" data-t="cancel"></button>
+    </form>
+    <p class="hint" data-t="nameHint"></p>
+  </section>
+
+  <section>
+    <h2 data-t="addresses"></h2>
+    <div id="addrs" class="addr">…</div>
+    <p class="hint" data-t="addrHint"></p>
+  </section>
+
+  <p id="offline" class="error" hidden data-t="offline"></p>
+
+  <footer>
+    <span id="version"></span>
+    <button class="danger" id="quitBtn" data-t="quit"></button>
+  </footer>
+</main>
+<script>
+const zh = (navigator.language || '').toLowerCase().startsWith('zh');
+const T = zh ? {
+  title: 'Local AI 小幫手',
+  subtitle: '讓家裡的手機用這台電腦上的 AI 模型。這個頁面只有這台電腦看得到。',
+  computer: '這台電腦',
+  rename: '改名',
+  save: '儲存',
+  cancel: '取消',
+  nameHint: '手機上會用這個名字顯示這台電腦。',
+  addresses: '手機連線位址',
+  addrHint: '手機要跟這台電腦連同一個 Wi-Fi。',
+  noAddr: '找不到區網位址，請確認這台電腦有連上網路。',
+  vpn: 'Tailscale',
+  offline: '小幫手已經結束。要再用請重新打開小幫手。',
+  quit: '結束小幫手',
+  quitConfirm: '結束後手機就連不到這台電腦。確定要結束嗎？',
+  version: '版本',
+} : {
+  title: 'Local AI Helper',
+  subtitle: 'Lets phones at home use the AI models on this computer. Only this computer can see this page.',
+  computer: 'This computer',
+  rename: 'Rename',
+  save: 'Save',
+  cancel: 'Cancel',
+  nameHint: 'Phones show this computer by this name.',
+  addresses: 'Addresses for phones',
+  addrHint: 'Phones need to be on the same Wi-Fi as this computer.',
+  noAddr: 'No local network address found. Check that this computer is connected.',
+  vpn: 'Tailscale',
+  offline: 'The helper has quit. Open it again to keep using it.',
+  quit: 'Quit Helper',
+  quitConfirm: "Phones won't be able to reach this computer after you quit. Quit anyway?",
+  version: 'Version',
+};
+document.documentElement.lang = zh ? 'zh-Hant' : 'en';
+document.title = T.title;
+for (const el of document.querySelectorAll('[data-t]')) el.textContent = T[el.dataset.t];
+
+const $ = (id) => document.getElementById(id);
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'X-Local-AI': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+
+let current = null;
+async function refresh() {
+  try {
+    const r = await fetch('/admin/api/status', { cache: 'no-store' });
+    current = await r.json();
+    $('offline').hidden = true;
+    if ($('nameEdit').hidden) $('name').textContent = current.name;
+    $('version').textContent = `${T.version} ${current.version}`;
+    const addrs = $('addrs');
+    addrs.replaceChildren();
+    if (current.addrs.length === 0) addrs.textContent = T.noAddr;
+    for (const a of current.addrs) {
+      const line = document.createElement('div');
+      line.textContent = `${a.ip}:${current.apiPort}`;
+      if (a.kind === 'vpn') {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = T.vpn;
+        line.append(tag);
+      }
+      addrs.append(line);
+    }
+  } catch {
+    $('offline').hidden = false;
+  }
+}
+
+$('renameBtn').onclick = () => {
+  $('nameInput').value = current?.name ?? '';
+  $('nameView').hidden = true;
+  $('nameEdit').hidden = false;
+  $('nameInput').focus();
+};
+$('cancelRename').onclick = () => { $('nameEdit').hidden = true; $('nameView').hidden = false; };
+$('nameEdit').onsubmit = async (e) => {
+  e.preventDefault();
+  const name = $('nameInput').value.trim();
+  if (!name) return;
+  await post('/admin/api/name', { name });
+  $('nameEdit').hidden = true;
+  $('nameView').hidden = false;
+  refresh();
+};
+$('quitBtn').onclick = async () => {
+  if (!confirm(T.quitConfirm)) return;
+  await post('/admin/api/quit').catch(() => {});
+  setTimeout(refresh, 500);
+};
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
