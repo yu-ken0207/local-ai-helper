@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yu-ken0207/local-ai-helper/internal/platform"
 )
 
 type GPU struct {
@@ -47,7 +49,7 @@ func nvidiaGPUs() []GPU {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits")
-	hideWindow(cmd)
+	platform.HideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return []GPU{}

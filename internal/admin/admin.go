@@ -15,6 +15,7 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
 	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
@@ -38,6 +39,8 @@ type Server struct {
 	Quit func()
 	// Addrs 目前的區網位址（測試可以換掉）
 	Addrs func() []netinfo.Addr
+	// Ollama 幫忙裝、開 Ollama；nil 就不提供
+	Ollama *ollama.Manager
 }
 
 type Status struct {
@@ -51,6 +54,7 @@ type Status struct {
 	Pairing  *PairingView   `json:"pairing,omitempty"`
 	Paired   *DeviceView    `json:"paired,omitempty"`
 	Engines  []engine.Info  `json:"engines"`
+	Ollama   *ollama.Status `json:"ollama,omitempty"`
 }
 
 type DeviceView struct {
@@ -118,6 +122,8 @@ func (s *Server) Handler() http.Handler {
 		s.redetect()
 		s.status(w, r)
 	})
+	mux.HandleFunc("POST /admin/api/ollama/install", s.installOllama)
+	mux.HandleFunc("POST /admin/api/ollama/start", s.startOllama)
 	mux.HandleFunc("POST /admin/api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
 		if s.Quit != nil {
@@ -156,7 +162,53 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if s.Engines != nil {
 		st.Engines = s.Engines(r.Context())
 	}
+	if s.Ollama != nil {
+		o := s.Ollama.Status()
+		st.Ollama = &o
+	}
 	writeJSON(w, st)
+}
+
+func (s *Server) ollamaUp(r *http.Request) bool {
+	if s.Engines == nil {
+		return false
+	}
+	for _, e := range s.Engines(r.Context()) {
+		if e.Kind == engine.KindOllama && e.OK {
+			return true
+		}
+	}
+	return false
+}
+
+// installOllama 一鍵安裝；已經開著或使用者自己裝過就不裝（不蓋掉別人的 Ollama）
+func (s *Server) installOllama(w http.ResponseWriter, r *http.Request) {
+	if s.Ollama == nil {
+		writeError(w, http.StatusNotFound, "unsupported", "not available")
+		return
+	}
+	if s.ollamaUp(r) {
+		writeError(w, http.StatusConflict, "already_running", "Ollama is already running")
+		return
+	}
+	if s.Ollama.Status().Installed == "system" {
+		writeError(w, http.StatusConflict, "already_installed", "Ollama is already installed on this computer")
+		return
+	}
+	s.Ollama.Install()
+	s.status(w, r)
+}
+
+func (s *Server) startOllama(w http.ResponseWriter, r *http.Request) {
+	if s.Ollama == nil {
+		writeError(w, http.StatusNotFound, "unsupported", "not available")
+		return
+	}
+	if err := s.Ollama.Start(); err != nil {
+		writeError(w, http.StatusBadGateway, "start_failed", err.Error())
+		return
+	}
+	s.status(w, r)
 }
 
 func (s *Server) redetect() {
@@ -261,4 +313,11 @@ func writeJSON(w http.ResponseWriter, v any) {
 // URL 管理頁網址
 func URL(port int) string {
 	return "http://127.0.0.1:" + strconv.Itoa(port) + "/"
+}
+
+// writeError {"error": "說明", "code": "代碼"}
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
 }

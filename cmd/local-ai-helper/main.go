@@ -24,9 +24,13 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/gateway"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 	"github.com/yu-ken0207/local-ai-helper/internal/platform"
 	"github.com/yu-ken0207/local-ai-helper/internal/tray"
+
+	// 系統沒有根憑證時（精簡的 Linux）用 Go 內建的一份，下載 Ollama 才連得上 HTTPS
+	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
 // version 編譯時用 -ldflags "-X main.version=..." 填入
@@ -86,6 +90,18 @@ func main() {
 	}
 	gw := &gateway.Server{Store: store, Pairing: pair, Version: version, OllamaURL: cfg.OllamaURL, Registry: registry}
 
+	// 小幫手裝的 Ollama：開著小幫手就開著它（結束時一起關）
+	var olm *ollama.Manager
+	if olDir, err := ollama.DefaultDir(); err == nil {
+		olm = ollama.NewManager(olDir, cfg.OllamaURL, filepath.Join(dir, "ollama.log"))
+		// 開發測試用：從假的發佈頁下載
+		olm.Installer.BaseURL = os.Getenv("LOCAL_AI_HELPER_OLLAMA_RELEASES")
+		go olm.Boot(context.Background())
+		defer olm.Runner.Stop()
+	} else {
+		log.Printf("找不到放 Ollama 的資料夾：%v", err)
+	}
+
 	// 手機用的門口（聽區網）；開不起來就在管理頁說明原因，管理頁照常可以用
 	var apiErr struct {
 		sync.Mutex
@@ -108,7 +124,7 @@ func main() {
 
 	adminSrv := &http.Server{
 		Handler: (&admin.Server{
-			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines, Redetect: registry.Redetect,
+			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines, Redetect: registry.Redetect, Ollama: olm,
 			APIError: func() string {
 				apiErr.Lock()
 				defer apiErr.Unlock()

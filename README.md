@@ -10,7 +10,10 @@
 
 ## 設計
 
-- 手機只跟小幫手講話（要帶配對時拿到的權杖），小幫手再接後面的引擎：Ollama（預設，沒有就自動安裝）、LM Studio、OpenAI 格式的伺服器（llama.cpp、vLLM、Jan…）
+- 手機只跟小幫手講話（要帶配對時拿到的權杖），小幫手再接後面的引擎：Ollama（預設，沒有就一鍵安裝）、LM Studio、OpenAI 格式的伺服器（llama.cpp、vLLM、Jan…）
+- 一鍵安裝 Ollama（管理頁「安裝 Ollama」）：不用官方安裝程式（Windows 會多一個系統匣圖示、Linux 要 sudo），改下載 GitHub 上官方發佈的壓縮檔（Linux `.tar.zst`、Windows `.zip`，約 1.6 GB），**比對官方 `sha256sum.txt`** 後解到使用者資料夾（Windows `%LOCALAPPDATA%\local-ai-helper\ollama`、Linux `~/.local/share/local-ai-helper/ollama`），不用管理員權限。先解到旁邊的資料夾、全部成功才換上去；擋掉路徑或連結跑到資料夾外面的檔案；磁碟要有壓縮檔三倍的空間。Jetson 與 AMD 顯示卡（Linux）照官方 install.sh 多疊 jetpack／rocm 套件
+- 小幫手裝的 Ollama 由小幫手開著（`ollama serve`，輸出寫到設定資料夾的 `ollama.log`）：小幫手啟動時自動開、意外結束 3 秒後重開（一分鐘內連續失敗 5 次就停，管理頁顯示原因與「打開 Ollama」）、小幫手結束一起關；Linux 用 Pdeathsig、Windows 用 Job Object，小幫手當掉也不會留下 Ollama。使用者自己裝的 Ollama 不會被蓋掉（沒開時管理頁有「打開 Ollama」；Windows 打開它自己的 `ollama app.exe`）
+- 系統沒有根憑證時（精簡的 Linux）用 Go 內建的一份（`x509roots/fallback`），下載才連得上 HTTPS
 - 引擎：Ollama 原樣轉送；LM Studio 用原生 API 列模型（0.4 起 `/api/v1/models`，舊版 `/api/v0/models`）與載入／卸載，聊天走 OpenAI 格式；其他 OpenAI 格式伺服器在常見連接埠（8080、8000、1337、4891、5000）自動偵測（看 `/v1/models` 的格式與 `owned_by`），也可以在管理頁手動加（網址、名稱、API 金鑰）
 - 模型清單合併所有引擎，每個模型多 `engine`、`engine_name`、`can_load`（能不能預先載入）；跟 Ollama 撞名的改叫「名稱@引擎」（Ollama 的名稱永遠不變）；聊天時依名稱找回引擎，OpenAI 的串流（含 `reasoning_content`、用量）翻回 Ollama 的逐行格式；圖片轉成 `image_url`
 - 下載模型在小幫手這邊跑（不綁手機的連線），手機鎖螢幕、App 關掉都不會中斷，回來再問進度：Ollama 用 `/api/pull`（各層進度加總，可以取消）；LM Studio 用 `/api/v1/models/download`＋每秒問進度（LM Studio 沒有取消的 API）。工作只放記憶體，結束後留 1 小時
@@ -45,6 +48,8 @@ export PATH=$HOME/.local/go/bin:$PATH
 go test ./...
 scripts/build.sh          # dist/ 下產生 windows-amd64.exe、linux-amd64、linux-arm64
 ./dist/local-ai-helper-linux-arm64 --no-browser --no-tray --config-dir /tmp/x   # 沒有桌面時
+# 測一鍵安裝又不想真的下載：LOCAL_AI_HELPER_OLLAMA_RELEASES 指到假的發佈頁（要有 /latest/download/sha256sum.txt 與壓縮檔），
+# XDG_DATA_HOME 換掉安裝位置、PATH 拿掉 ollama
 ```
 
 ```
@@ -54,9 +59,10 @@ internal/admin/        本機管理頁與 API（page/index.html 內嵌，中英�
 internal/gateway/      手機連的門口：hello、配對、權杖檢查、依模型轉給對的引擎、下載工作（downloads.go）
 internal/engine/       LM Studio、OpenAI 格式伺服器：偵測、模型清單、聊天翻譯、載入／卸載、LM Studio 下載（enginetest/ 是假引擎）
 internal/hardware/     記憶體、NVIDIA 顯示卡
+internal/ollama/       一鍵安裝 Ollama（下載、比對官方檢查碼、解開）與開著它（自動重開）
 internal/pairing/      配對時段、配對碼、權杖（只存雜湊）、QR code
 internal/netinfo/      找手機連得到的位址（排除 Docker、WSL 等虛擬網卡）
-internal/platform/     開瀏覽器、介面語言、有沒有桌面
+internal/platform/     開瀏覽器、介面語言、有沒有桌面、子程式（不跳視窗、跟著小幫手結束）、磁碟空間、資料資料夾
 internal/tray/         系統匣圖示
 ```
 
@@ -69,7 +75,7 @@ internal/tray/         系統匣圖示
 | 3 | App：掃 QR code 配對、找小幫手、輸入配對碼 | 完成（local-chat） |
 | 4 | 接 LM Studio 與 OpenAI 格式的伺服器 | 完成（Linux 實機測試 LM Studio 0.4 llmster：合併清單、看圖聊天、載入／卸載） |
 | 5 | App：依引擎隱藏做不到的功能、在手機下載模型與推薦（硬體偵測提前在這步做） | 完成（Linux 實機測試：Ollama 下載進度與取消、LM Studio 下載進度、名稱打錯；配備回報 GB10 共用記憶體） |
-| 6 | 一鍵安裝 Ollama | |
+| 6 | 一鍵安裝 Ollama | 完成（Linux 乾淨容器實測：下載 1.6 GB、比對檢查碼、解開、開起來、偵測到 GB10、跑模型；強制結束會自動重開、小幫手重開會自動開 Ollama；管理頁每個狀態截圖確認。Windows 待測試機） |
 | 7 | 開機自動啟動、使用中不睡眠、防火牆 | |
 | 8 | App：連不到時說得更準、第一次載入的等待說明 | |
 
@@ -80,5 +86,9 @@ internal/tray/         系統匣圖示
 - **LM Studio 從 Hugging Face 下載，很慢**（實測約 0.3 MB/s；Ollama 同一台約 28 MB/s）。LM Studio 沒有取消下載的 API，要取消只能在 LM Studio 裡按。
 
 - **Ollama 上已經有的模型再下載一次，如果官方出了新版會下載新版**（實測 `gemma4:e2b`）。App 的推薦清單把已經有的標成「已下載」、不給再按，不會誤觸。
+
+- **Windows 的 AMD 顯示卡還沒有 rocm 套件**（只裝主程式，用 CPU 或 Vulkan）。
+
+- **精簡的 Linux 沒有根憑證時，Ollama 自己下載模型會失敗**（小幫手有內建的一份，Ollama 沒有）；一般桌面系統都有，裝 `ca-certificates` 後在管理頁重開 Ollama 就好。
 
 - **沒有程式碼簽章，防毒軟體可能把執行檔當成可疑程式刪掉**（裝了企業防毒的電腦就刪過測試版）。要給一般人用之前要處理：簽章、送防毒廠商誤判審查。

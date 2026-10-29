@@ -1,9 +1,6 @@
 package hardware
 
-import (
-	"os"
-	"os/exec"
-)
+import "os"
 
 func totalMemory() int64 {
 	data, err := os.ReadFile("/proc/meminfo")
@@ -12,5 +9,3 @@ func totalMemory() int64 {
 	}
 	return ParseMeminfo(string(data))
 }
-
-func hideWindow(*exec.Cmd) {}

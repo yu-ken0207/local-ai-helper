@@ -1,14 +1,19 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
+	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
+	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
@@ -157,5 +162,46 @@ func TestAddAndRemoveServer(t *testing.T) {
 	}
 	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/servers/nope/remove", "", hdr); rec.Code != http.StatusNotFound {
 		t.Fatalf("移除不存在的：%d", rec.Code)
+	}
+}
+
+func TestInstallOllama(t *testing.T) {
+	s, h := newServer(t)
+	m := ollama.NewManager(filepath.Join(t.TempDir(), "ollama"), "http://127.0.0.1:1", "")
+	m.Installer.GOARCH = "386" // 不支援的電腦：馬上失敗，不會真的下載
+	m.LookPath = func() string { return "" }
+	s.Ollama = m
+	up := false
+	s.Engines = func(context.Context) []engine.Info { return []engine.Info{{Kind: engine.KindOllama, OK: up}} }
+	post := func(path string) *httptest.ResponseRecorder {
+		return do(h, "POST", "127.0.0.1:11481", path, "", map[string]string{"X-Local-AI": "1"})
+	}
+	var st Status
+	_ = json.NewDecoder(do(h, "GET", "127.0.0.1:11481", "/admin/api/status", "", nil).Body).Decode(&st)
+	if st.Ollama == nil || st.Ollama.Installed != "" {
+		t.Fatalf("%+v", st.Ollama)
+	}
+	if rec := post("/admin/api/ollama/install"); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for m.Installer.Progress().State != "failed" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if p := m.Installer.Progress(); p.Code != "unsupported" {
+		t.Fatalf("%+v", p)
+	}
+	// 使用者自己裝的 Ollama 不蓋掉；已經開著也不裝
+	m.LookPath = func() string { return "/usr/bin/ollama" }
+	if rec := post("/admin/api/ollama/install"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already_installed") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	up = true
+	if rec := post("/admin/api/ollama/install"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "already_running") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	// 要帶 X-Local-AI（別的網站不能叫它裝東西）
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/ollama/install", "", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("%d", rec.Code)
 	}
 }

@@ -1,7 +1,6 @@
 package hardware
 
 import (
-	"os/exec"
 	"syscall"
 	"unsafe"
 )
@@ -27,10 +26,4 @@ func totalMemory() int64 {
 		return 0
 	}
 	return int64(m.TotalPhys)
-}
-
-// hideWindow 小幫手沒有主控台視窗，執行 nvidia-smi 不要跳出黑色視窗
-func hideWindow(cmd *exec.Cmd) {
-	const createNoWindow = 0x08000000
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 }
