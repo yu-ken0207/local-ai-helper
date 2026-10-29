@@ -27,6 +27,8 @@ type fakeOllama struct {
 	auth     []string
 	// pullStep 下載時每一行之間停多久（測取消用）
 	pullStep time.Duration
+	// chatBodies 收到的聊天請求原文
+	chatBodies []string
 }
 
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +43,15 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"models":[{"name":"gemma4:12b"}]}`)
 	case "/api/chat":
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.chatBodies = append(f.chatBodies, string(body))
+		f.mu.Unlock()
+		if strings.Contains(string(body), `"tools"`) {
+			fmt.Fprint(w, `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"create_event","arguments":{"title":"看牙醫"}}}]},"done":false}`+"\n")
+			fmt.Fprint(w, `{"done":true,"done_reason":"stop"}`+"\n")
+			return
+		}
 		for _, part := range []string{"你", "好"} {
 			fmt.Fprintf(w, `{"message":{"role":"assistant","content":%q},"done":false}`+"\n", part)
 			w.(http.Flusher).Flush()
@@ -255,7 +266,7 @@ func setupWithLMStudio(t *testing.T, ollamaURL string) (*Server, http.Handler, *
 	t.Helper()
 	lm := &enginetest.Fake{Models: []enginetest.FakeModel{
 		{Key: "google/gemma-3-12b", Vision: true, Loaded: true},
-		{Key: "openai/gpt-oss-20b", Reasoning: []string{"low", "medium", "high"}},
+		{Key: "openai/gpt-oss-20b", Reasoning: []string{"low", "medium", "high"}, Tools: true},
 		{Key: "gemma4:12b"},
 	}}
 	lmSrv := httptest.NewServer(lm)
@@ -527,5 +538,38 @@ func TestChatKeepsComputerAwakeAndNotesLANPhones(t *testing.T) {
 	}
 	if s.LANSeen().IsZero() {
 		t.Fatal("區網的手機連進來要記下（證明防火牆沒擋）")
+	}
+}
+
+func TestToolsPassThroughToOllama(t *testing.T) {
+	fake := &fakeOllama{}
+	ollama := httptest.NewServer(fake)
+	defer ollama.Close()
+	s, h := setup(t, ollama.URL)
+	token := pairPhone(t, s, h)
+	body := `{"model":"gemma4:12b","tools":[{"type":"function","function":{"name":"create_event"}}],"messages":[{"role":"tool","tool_name":"list_events","content":"[]"}]}`
+	rec := call(h, "POST", "/api/chat", token, body)
+	if len(fake.chatBodies) != 1 || fake.chatBodies[0] != body {
+		t.Fatalf("Ollama 要原樣收到工具清單與工具結果：%v", fake.chatBodies)
+	}
+	if !strings.Contains(rec.Body.String(), `"tool_calls":[{"function":{"name":"create_event","arguments":{"title":"看牙醫"}}}]`) {
+		t.Fatalf("工具呼叫要原樣回給手機：%s", rec.Body)
+	}
+}
+
+func TestShowSaysWhichModelsCanUseTools(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, _, token := setupWithLMStudio(t, ollama.URL)
+	var show struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	_ = json.NewDecoder(call(h, "POST", "/api/show", token, `{"model":"openai/gpt-oss-20b"}`).Body).Decode(&show)
+	if !strings.Contains(strings.Join(show.Capabilities, ","), "tools") {
+		t.Fatalf("會叫工具的模型要標 tools：%v", show.Capabilities)
+	}
+	_ = json.NewDecoder(call(h, "POST", "/api/show", token, `{"model":"google/gemma-3-12b"}`).Body).Decode(&show)
+	if strings.Contains(strings.Join(show.Capabilities, ","), "tools") {
+		t.Fatalf("不會叫工具的模型不能標 tools：%v", show.Capabilities)
 	}
 }

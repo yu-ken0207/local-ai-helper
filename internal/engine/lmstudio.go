@@ -55,6 +55,7 @@ func (l *LMStudio) modelsV1(ctx context.Context) ([]Model, error) {
 			} `json:"loaded_instances"`
 			Capabilities *struct {
 				Vision    bool `json:"vision"`
+				Tools     bool `json:"trained_for_tool_use"`
 				Reasoning *struct {
 					AllowedOptions []string `json:"allowed_options"`
 				} `json:"reasoning"`
@@ -75,6 +76,7 @@ func (l *LMStudio) modelsV1(ctx context.Context) ([]Model, error) {
 		}
 		if m.Capabilities != nil {
 			model.Vision = m.Capabilities.Vision
+			model.Tools = m.Capabilities.Tools
 			if m.Capabilities.Reasoning != nil {
 				model.Reasoning = m.Capabilities.Reasoning.AllowedOptions
 			}

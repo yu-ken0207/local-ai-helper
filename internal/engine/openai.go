@@ -115,6 +115,9 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 	if reasoning != "" {
 		body["reasoning_effort"] = reasoning
 	}
+	if len(req.Tools) > 0 {
+		body["tools"] = req.Tools
+	}
 	data, _ := json.Marshal(body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
@@ -151,6 +154,7 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 		CompletionTokens int `json:"completion_tokens"`
 	}
 	finish := "stop"
+	var calls toolCallBuilder
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
 	for scanner.Scan() {
@@ -166,9 +170,10 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
+					Content          string                `json:"content"`
+					ReasoningContent string                `json:"reasoning_content"`
+					Reasoning        string                `json:"reasoning"`
+					ToolCalls        []openAIToolCallDelta `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -202,6 +207,10 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 				}
 				send(map[string]any{"model": req.Model, "created_at": time.Now().UTC().Format(time.RFC3339Nano), "message": msg, "done": false})
 			}
+			if len(c.Delta.ToolCalls) > 0 && firstToken.IsZero() {
+				firstToken = time.Now()
+			}
+			calls.add(c.Delta.ToolCalls)
 			if c.FinishReason != nil && *c.FinishReason != "" {
 				finish = *c.FinishReason
 			}
@@ -210,6 +219,13 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		send(map[string]any{"error": "stream interrupted: " + err.Error()})
 		return nil
+	}
+	// 工具呼叫是一段一段送來的，拼完整之後一次給手機（跟 Ollama 一樣放在一行裡）
+	if done := calls.build(); len(done) > 0 {
+		send(map[string]any{"model": req.Model, "created_at": time.Now().UTC().Format(time.RFC3339Nano), "message": map[string]any{"role": "assistant", "content": "", "tool_calls": done}, "done": false})
+	}
+	if finish == "tool_calls" {
+		finish = "stop" // Ollama 叫工具時也是 stop
 	}
 	end := time.Now()
 	evalStart := firstToken
@@ -231,10 +247,100 @@ func openAIChat(ctx context.Context, url, apiKey string, req ChatRequest, reason
 	return nil
 }
 
-// toOpenAIMessages Ollama 的訊息（圖片是 base64 陣列）翻成 OpenAI 的格式（圖片是 image_url）
+// openAIToolCallDelta 串流裡的一小段工具呼叫：同一個 index 的 arguments 要接起來
+type openAIToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type toolCallBuilder struct {
+	order []int
+	parts map[int]*openAIToolCallDelta
+}
+
+func (b *toolCallBuilder) add(deltas []openAIToolCallDelta) {
+	for _, d := range deltas {
+		if b.parts == nil {
+			b.parts = map[int]*openAIToolCallDelta{}
+		}
+		p, ok := b.parts[d.Index]
+		if !ok {
+			p = &openAIToolCallDelta{Index: d.Index}
+			b.parts[d.Index] = p
+			b.order = append(b.order, d.Index)
+		}
+		if d.ID != "" {
+			p.ID = d.ID
+		}
+		p.Function.Name += d.Function.Name
+		p.Function.Arguments += d.Function.Arguments
+	}
+}
+
+// build 翻成 Ollama 的格式：arguments 是物件；拼起來不是合法 JSON 就原樣給字串，讓手機回報給模型重填
+func (b *toolCallBuilder) build() []ToolCall {
+	out := make([]ToolCall, 0, len(b.order))
+	for i, idx := range b.order {
+		p := b.parts[idx]
+		if p.Function.Name == "" {
+			continue
+		}
+		var call ToolCall
+		call.ID = p.ID
+		if call.ID == "" {
+			call.ID = fmt.Sprintf("call_%d", i)
+		}
+		call.Function.Name = p.Function.Name
+		args := strings.TrimSpace(p.Function.Arguments)
+		switch {
+		case args == "":
+			call.Function.Arguments = json.RawMessage("{}")
+		case json.Valid([]byte(args)) && strings.HasPrefix(args, "{"):
+			call.Function.Arguments = json.RawMessage(args)
+		default:
+			raw, _ := json.Marshal(args)
+			call.Function.Arguments = raw
+		}
+		out = append(out, call)
+	}
+	return out
+}
+
+// toOpenAIMessages Ollama 的訊息翻成 OpenAI 的格式：圖片從 base64 陣列改成 image_url；
+// 工具呼叫的 arguments 從物件改成字串；工具結果要對上呼叫的編號（Ollama 只給工具名稱時依順序配對）
 func toOpenAIMessages(msgs []ChatMessage) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
+	var pending []ToolCall // 最近一次 assistant 叫了、還沒收到結果的工具
 	for _, m := range msgs {
+		if len(m.ToolCalls) > 0 {
+			calls := make([]map[string]any, 0, len(m.ToolCalls))
+			pending = pending[:0]
+			for i, c := range m.ToolCalls {
+				if c.ID == "" {
+					c.ID = fmt.Sprintf("call_%d", i)
+				}
+				pending = append(pending, c)
+				calls = append(calls, map[string]any{"id": c.ID, "type": "function", "function": map[string]any{"name": c.Function.Name, "arguments": argumentsString(c.Function.Arguments)}})
+			}
+			out = append(out, map[string]any{"role": "assistant", "content": m.Content, "tool_calls": calls})
+			continue
+		}
+		if m.Role == "tool" {
+			id := m.ToolCallID
+			for i, c := range pending {
+				if (id != "" && c.ID == id) || (id == "" && (m.ToolName == "" || c.Function.Name == m.ToolName)) {
+					id = c.ID
+					pending = append(pending[:i], pending[i+1:]...)
+					break
+				}
+			}
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": id, "content": m.Content})
+			continue
+		}
 		if len(m.Images) == 0 {
 			out = append(out, map[string]any{"role": m.Role, "content": m.Content})
 			continue
@@ -249,6 +355,18 @@ func toOpenAIMessages(msgs []ChatMessage) []map[string]any {
 		out = append(out, map[string]any{"role": m.Role, "content": parts})
 	}
 	return out
+}
+
+// argumentsString OpenAI 的 arguments 是 JSON 字串；手機送來的可能是物件也可能已經是字串
+func argumentsString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // imageType 從 base64 開頭猜圖片格式（手機送的是 JPEG）

@@ -136,6 +136,9 @@ func (s *Server) show(w http.ResponseWriter, r *http.Request, body []byte) {
 	if m.Vision {
 		caps = append(caps, "vision")
 	}
+	if m.Tools {
+		caps = append(caps, "tools")
+	}
 	out := map[string]any{
 		"capabilities": caps,
 		"details":      map[string]any{"family": m.Family, "parameter_size": m.ParamSize, "quantization_level": m.Quantization},

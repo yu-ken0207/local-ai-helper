@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -26,6 +27,8 @@ type Model struct {
 	// CanLoad 能不能預先載入／卸載（舊版 LM Studio、OpenAI 格式的伺服器不行）
 	CanLoad bool
 	Vision  bool
+	// Tools 會叫工具（LM Studio 的 trained_for_tool_use）；OpenAI 格式的伺服器查不到，當作不會
+	Tools bool
 	// Reasoning 可以選的推理程度（LM Studio：off/on/low/medium/high）；空的就是不能調
 	Reasoning     []string
 	ContextLength int
@@ -68,7 +71,9 @@ type ChatRequest struct {
 	Messages []ChatMessage `json:"messages"`
 	Stream   *bool         `json:"stream,omitempty"`
 	Think    any           `json:"think,omitempty"`
-	Options  struct {
+	// Tools 手機給模型的工具清單；Ollama 的格式（type: function）跟 OpenAI 一樣，原樣轉送
+	Tools   []json.RawMessage `json:"tools,omitempty"`
+	Options struct {
 		NumPredict  int      `json:"num_predict,omitempty"`
 		Temperature *float64 `json:"temperature,omitempty"`
 	} `json:"options"`
@@ -78,6 +83,20 @@ type ChatMessage struct {
 	Role    string   `json:"role"`
 	Content string   `json:"content"`
 	Images  []string `json:"images,omitempty"`
+	// ToolCalls 模型要叫的工具（assistant 訊息）
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolName、ToolCallID 工具執行結果（role: tool）屬於哪個工具、哪一次呼叫
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall 一次工具呼叫（Ollama 的格式：arguments 是物件）
+type ToolCall struct {
+	ID       string `json:"id,omitempty"`
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+	} `json:"function"`
 }
 
 // Error 引擎回報的錯誤（照 HTTP 狀態碼回給手機）

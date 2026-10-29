@@ -212,3 +212,66 @@ func TestRegistryDetectsAndRoutes(t *testing.T) {
 		t.Fatal("不是這裡的模型要交給 Ollama")
 	}
 }
+
+func TestChatToolsTranslateBothWays(t *testing.T) {
+	fake := &enginetest.Fake{Models: []enginetest.FakeModel{{Key: "qwen/qwen3-4b-2507", Tools: true}}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	l := &engine.LMStudio{BaseURL: srv.URL}
+	var req engine.ChatRequest
+	// 手機送的是 Ollama 格式：上一輪叫過工具（arguments 是物件），工具結果只帶名稱
+	body := `{"model":"qwen/qwen3-4b-2507","tools":[{"type":"function","function":{"name":"create_event","parameters":{"type":"object"}}}],
+	  "messages":[{"role":"user","content":"加行程"},
+	    {"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_events","arguments":{"start":"2026-11-05"}}},{"function":{"name":"list_calendars","arguments":{}}}]},
+	    {"role":"tool","tool_name":"list_calendars","content":"[\"家庭\"]"},
+	    {"role":"tool","tool_name":"list_events","content":"[]"}]}`
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	if err := l.Chat(ctx, req, rec); err != nil {
+		t.Fatal(err)
+	}
+	sent := fake.Requests[0]
+	if tools := sent["tools"].([]any); len(tools) != 1 || tools[0].(map[string]any)["type"] != "function" {
+		t.Fatalf("工具清單要原樣轉送：%v", sent["tools"])
+	}
+	msgs := sent["messages"].([]any)
+	calls := msgs[1].(map[string]any)["tool_calls"].([]any)
+	first := calls[0].(map[string]any)
+	if first["id"] != "call_0" || first["function"].(map[string]any)["arguments"] != `{"start":"2026-11-05"}` {
+		t.Fatalf("叫工具要有編號、arguments 要變成字串：%v", first)
+	}
+	// 工具結果依名稱配對編號（順序跟呼叫不同也要對）
+	if msgs[2].(map[string]any)["tool_call_id"] != "call_1" || msgs[3].(map[string]any)["tool_call_id"] != "call_0" {
+		t.Fatalf("工具結果沒對上編號：%v %v", msgs[2], msgs[3])
+	}
+
+	// 回來的工具呼叫拼完整、翻成 Ollama 格式（arguments 是物件），壞掉的 arguments 原樣給字串
+	lines := readNDJSON(t, rec.Body.String())
+	if len(lines) != 2 {
+		t.Fatalf("要一行工具呼叫加一行結束：%s", rec.Body)
+	}
+	got := lines[0]["message"].(map[string]any)["tool_calls"].([]any)
+	a := got[0].(map[string]any)
+	args := a["function"].(map[string]any)["arguments"].(map[string]any)
+	if a["id"] != "call_a" || a["function"].(map[string]any)["name"] != "create_event" || args["title"] != "看牙醫" || args["start"] != "2026-11-05T15:00" {
+		t.Fatalf("第一個工具呼叫不對：%v", a)
+	}
+	if b := got[1].(map[string]any); b["function"].(map[string]any)["arguments"] != "{bad" {
+		t.Fatalf("壞掉的 arguments 要原樣交給手機：%v", b)
+	}
+	if last := lines[1]; last["done"] != true || last["done_reason"] != "stop" || last["eval_count"] != float64(9) {
+		t.Fatalf("最後一行不對：%v", last)
+	}
+}
+
+func TestLMStudioToolCapability(t *testing.T) {
+	fake := &enginetest.Fake{Models: []enginetest.FakeModel{{Key: "a", Tools: true}, {Key: "b"}}}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	models, err := (&engine.LMStudio{BaseURL: srv.URL}).Models(ctx)
+	if err != nil || !models[0].Tools || models[1].Tools {
+		t.Fatalf("要照 trained_for_tool_use 標出會不會叫工具：%v %+v", err, models)
+	}
+}

@@ -12,6 +12,7 @@ import (
 type FakeModel struct {
 	Key       string
 	Vision    bool
+	Tools     bool
 	Reasoning []string
 	Loaded    bool
 	Embedding bool
@@ -57,7 +58,7 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if m.Loaded {
 				item["loaded_instances"] = []any{map[string]any{"id": m.Key, "config": map[string]any{"context_length": 8192}}}
 			}
-			caps := map[string]any{"vision": m.Vision, "trained_for_tool_use": false}
+			caps := map[string]any{"vision": m.Vision, "trained_for_tool_use": m.Tools}
 			if len(m.Reasoning) > 0 {
 				caps["reasoning"] = map[string]any{"allowed_options": m.Reasoning, "default": m.Reasoning[0]}
 			}
@@ -126,6 +127,16 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		model := fmt.Sprint(b["model"])
+		if _, ok := b["tools"]; ok {
+			// 有給工具：照 OpenAI 的樣子一段一段送兩個工具呼叫（arguments 拆開送）
+			send(`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"create_event","arguments":""}}]}}]}`)
+			send(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"title\":\"看牙醫\","}}]}}]}`)
+			send(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"start\":\"2026-11-05T15:00\"}"}}]}}]}`)
+			send(`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"list_events","arguments":"{bad"}}]},"finish_reason":"tool_calls"}]}`)
+			send(`{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":9}}`)
+			send(`[DONE]`)
+			return
+		}
 		send(`{"choices":[{"delta":{"role":"assistant","reasoning_content":"想一下"}}]}`)
 		send(`{"choices":[{"delta":{"content":"你"}}]}`)
 		send(`{"choices":[{"delta":{"content":"好 ` + model + `"},"finish_reason":"stop"}]}`)

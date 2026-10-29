@@ -41,7 +41,7 @@
 | `POST /helper/v1/downloads` | 要 | `{model, engine?}` 開始下載（202），回傳工作；同一個模型下載中再按回同一個工作；沒有能下載的引擎回 409 `no_download_engine` |
 | `GET /helper/v1/downloads` | 要 | `{downloads:[{id, model, engine, status, completed, total, code, error, cancellable}]}`；`status` 是 `downloading`／`done`／`failed`／`cancelled`；名稱打錯 `code` 是 `not_found` |
 | `DELETE /helper/v1/downloads/{id}` | 要 | 下載中的取消（LM Studio 回 501 `unsupported`）；已經結束的從清單拿掉 |
-| `/api/version` `tags` `show` `ps` `chat` `generate` `pull` | 要 | Ollama 格式；依模型轉給對的引擎（邊收邊送）。`tags` 合併所有引擎；`generate` 只用來預先載入（`keep_alive`）與卸載（`keep_alive: 0`），OpenAI 格式伺服器回 501 `unsupported`；`pull` 原樣轉給 Ollama（App 改用上面的下載 API）。其他 Ollama API（刪除、建立、推送）回 404 `not_allowed`；一個引擎都沒有回 502 `no_engine` |
+| `/api/version` `tags` `show` `ps` `chat` `generate` `pull` | 要 | Ollama 格式；依模型轉給對的引擎（邊收邊送）。`tags` 合併所有引擎；`generate` 只用來預先載入（`keep_alive`）與卸載（`keep_alive: 0`），OpenAI 格式伺服器回 501 `unsupported`；`pull` 原樣轉給 Ollama（App 改用上面的下載 API）。其他 Ollama API（刪除、建立、推送）回 404 `not_allowed`；一個引擎都沒有回 502 `no_engine`。`chat` 可以帶工具（`tools`、`tool_calls`、`role: tool`，手機上動手做事用）：Ollama 原樣轉送；LM Studio、OpenAI 格式的伺服器由小幫手翻譯，串流的工具呼叫拼完整再一次給（arguments 是物件，拼起來不是合法 JSON 就原樣給字串），工具結果依 `tool_call_id`、沒有時依工具名稱與順序配對。`show` 的 capabilities 有 `tools` 才代表這個模型會叫工具（LM Studio 看 `trained_for_tool_use`；OpenAI 格式的伺服器查不到，當作不會） |
 
 - 權杖放在 `Authorization: Bearer ...`；沒帶或被移除回 401 `not_paired`（App 要請使用者重新配對）
 - QR code 內容：`localai://pair?v=1&id=...&name=...&port=11480&code=123456&ip=192.168.1.20&ip=...`（App 依序試每個位址的 hello，識別碼要對）
@@ -85,6 +85,7 @@ internal/tray/         系統匣圖示
 | 6 | 一鍵安裝 Ollama | 完成（Linux 乾淨容器實測：下載 1.6 GB、比對檢查碼、解開、開起來、偵測到 GB10、跑模型；強制結束會自動重開、小幫手重開會自動開 Ollama；管理頁每個狀態截圖確認。Windows 待測試機） |
 | 7 | 開機自動啟動、使用中不睡眠、防火牆 | 完成（Linux 實機測試：開機啟動檔建立與關掉、ufw 偵測與放行指令、聊天時擋睡眠在非桌面登入下被拒並正確說明；管理頁截圖確認。Windows 待測試機） |
 | 8 | App：連不到時說得更準、第一次載入的等待說明 | 完成（local-chat 階段 J） |
+| 9 | 手機上動手做事 K1：轉送與翻譯工具、標出會叫工具的模型（設計見 local-chat `docs/設計_手機上動手做事.md`） | 完成（假引擎測試；Linux 實機測試 Ollama gemma4:12b 叫工具） |
 
 ## 已知問題
 
