@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -68,7 +69,7 @@ func (l *LMStudio) modelsV1(ctx context.Context) ([]Model, error) {
 		if m.Type != "llm" || m.Key == "" {
 			continue
 		}
-		model := Model{Name: m.Key, DisplayName: m.DisplayName, Engine: KindLMStudio, ContextLength: m.MaxContext, Family: m.Architecture, ParamSize: m.ParamsString, SizeBytes: m.SizeBytes}
+		model := Model{Name: m.Key, DisplayName: m.DisplayName, Engine: KindLMStudio, EngineName: "LM Studio", CanLoad: true, ContextLength: m.MaxContext, Family: m.Architecture, ParamSize: m.ParamsString, SizeBytes: m.SizeBytes}
 		if m.Quantization != nil {
 			model.Quantization = m.Quantization.Name
 		}
@@ -109,7 +110,7 @@ func (l *LMStudio) modelsV0(ctx context.Context) ([]Model, error) {
 		if (m.Type != "llm" && m.Type != "vlm") || m.ID == "" {
 			continue
 		}
-		model := Model{Name: m.ID, DisplayName: m.ID, Engine: KindLMStudio, Vision: m.Type == "vlm", ContextLength: m.MaxContext, Family: m.Arch, Quantization: m.Quantization}
+		model := Model{Name: m.ID, DisplayName: m.ID, Engine: KindLMStudio, EngineName: "LM Studio", Vision: m.Type == "vlm", ContextLength: m.MaxContext, Family: m.Arch, Quantization: m.Quantization}
 		if m.State == "loaded" {
 			model.LoadedContext = m.MaxContext
 		}
@@ -161,4 +162,26 @@ func notFoundUnsupported(err error) error {
 		return ErrUnsupported
 	}
 	return err
+}
+
+// DownloadStatus LM Studio 下載工作的狀態
+type DownloadStatus struct {
+	JobID      string `json:"job_id"`
+	Status     string `json:"status"` // downloading、paused、completed、failed、already_downloaded
+	Total      int64  `json:"total_size_bytes"`
+	Downloaded int64  `json:"downloaded_bytes"`
+}
+
+// StartDownload 叫 LM Studio 下載模型（目錄裡的名稱，例如 google/gemma-4-e4b，或 Hugging Face 連結）
+func (l *LMStudio) StartDownload(ctx context.Context, model string) (DownloadStatus, error) {
+	var st DownloadStatus
+	err := postJSON(ctx, l.BaseURL+"/api/v1/models/download", l.APIKey, map[string]any{"model": model}, &st)
+	return st, notFoundUnsupported(err)
+}
+
+// DownloadProgress 下載進度
+func (l *LMStudio) DownloadProgress(ctx context.Context, jobID string) (DownloadStatus, error) {
+	var st DownloadStatus
+	err := getJSON(ctx, l.BaseURL+"/api/v1/models/download/status/"+url.PathEscape(jobID), l.APIKey, &st)
+	return st, err
 }

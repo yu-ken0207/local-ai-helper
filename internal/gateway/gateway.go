@@ -15,6 +15,7 @@ import (
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
 	"github.com/yu-ken0207/local-ai-helper/internal/engine"
+	"github.com/yu-ken0207/local-ai-helper/internal/hardware"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 )
 
@@ -33,6 +34,8 @@ type Server struct {
 	OllamaURL string
 	// Registry 其他引擎（LM Studio、OpenAI 格式的伺服器）；nil 就只用 Ollama
 	Registry *engine.Registry
+
+	dl downloads
 }
 
 type Hello struct {
@@ -51,6 +54,10 @@ type Info struct {
 	Engines []engine.Info `json:"engines"`
 	// Features 手機可以用的功能（不同引擎做得到的不一樣）
 	Features map[string]bool `json:"features"`
+	// DownloadEngines 可以從手機下載模型的引擎，第一個是預設（Ollama 優先）
+	DownloadEngines []string `json:"download_engines"`
+	// Hardware 記憶體與顯示卡，手機用來判斷哪些模型跑得動
+	Hardware hardware.Info `json:"hardware"`
 }
 
 func (s *Server) Handler() http.Handler {
@@ -83,6 +90,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /helper/v1/hello", s.hello)
 	mux.HandleFunc("POST /helper/v1/pair", s.pair)
 	mux.Handle("GET /helper/v1/info", s.auth(http.HandlerFunc(s.info)))
+	mux.Handle("GET /helper/v1/downloads", s.auth(http.HandlerFunc(s.listDownloads)))
+	mux.Handle("POST /helper/v1/downloads", s.auth(http.HandlerFunc(s.startDownload)))
+	mux.Handle("DELETE /helper/v1/downloads/{id}", s.auth(http.HandlerFunc(s.stopDownload)))
 	mux.Handle("GET /api/version", s.auth(http.HandlerFunc(s.version)))
 	mux.Handle("GET /api/tags", s.auth(http.HandlerFunc(s.tags)))
 	mux.Handle("POST /api/show", s.auth(s.withBody(s.show)))
@@ -132,16 +142,10 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	c := s.Store.Get()
 	dev, _ := r.Context().Value(deviceKey{}).(config.Device)
 	engines := s.Engines(r.Context())
-	features := map[string]bool{"pull": false, "preload": false}
-	for _, e := range engines {
-		if e.OK && e.Kind == engine.KindOllama {
-			features["pull"], features["preload"] = true, true
-		}
-		if e.OK && e.Kind == engine.KindLMStudio {
-			features["preload"] = true
-		}
-	}
-	writeJSON(w, http.StatusOK, Info{ID: c.ID, Name: c.Name, Version: s.Version, Device: dev.Name, Engines: engines, Features: features})
+	pull := s.downloadEngines(engines)
+	// Ollama 與 LM Studio 能下載的，也都能預先載入
+	features := map[string]bool{"pull": len(pull) > 0, "preload": len(pull) > 0}
+	writeJSON(w, http.StatusOK, Info{ID: c.ID, Name: c.Name, Version: s.Version, Device: dev.Name, Engines: engines, Features: features, DownloadEngines: pull, Hardware: hardware.Detect()})
 }
 
 // Engines 這台電腦上的 AI 引擎狀態：Ollama（一定列出，沒開也列，讓使用者知道要開）＋偵測到的其他引擎

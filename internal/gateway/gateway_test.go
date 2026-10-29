@@ -23,6 +23,8 @@ type fakeOllama struct {
 	mu       sync.Mutex
 	requests []*http.Request
 	auth     []string
+	// pullStep 下載時每一行之間停多久（測取消用）
+	pullStep time.Duration
 }
 
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +45,31 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		fmt.Fprint(w, `{"done":true}`+"\n")
+	case "/api/pull":
+		var b struct{ Model string }
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if b.Model == "nope" {
+			fmt.Fprint(w, `{"status":"pulling manifest"}`+"\n"+`{"error":"pull model manifest: file does not exist"}`+"\n")
+			return
+		}
+		lines := []string{
+			`{"status":"pulling manifest"}`,
+			`{"status":"pulling aaa","digest":"sha256:aaa","total":1000,"completed":0}`,
+			`{"status":"pulling aaa","digest":"sha256:aaa","total":1000,"completed":600}`,
+			`{"status":"pulling bbb","digest":"sha256:bbb","total":200,"completed":200}`,
+			`{"status":"pulling aaa","digest":"sha256:aaa","total":1000,"completed":1000}`,
+			`{"status":"verifying sha256 digest"}`,
+			`{"status":"success"}`,
+		}
+		for _, l := range lines {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(f.pullStep):
+			}
+			fmt.Fprint(w, l+"\n")
+			w.(http.Flusher).Flush()
+		}
 	default:
 		http.NotFound(w, r)
 	}
@@ -333,8 +360,130 @@ func TestWorksWithoutOllama(t *testing.T) {
 	}
 	var info Info
 	_ = json.NewDecoder(call(h, "GET", "/helper/v1/info", token, "").Body).Decode(&info)
-	if len(info.Engines) != 2 || info.Engines[0].OK || !info.Engines[1].OK || info.Features["pull"] || !info.Features["preload"] {
+	if len(info.Engines) != 2 || info.Engines[0].OK || !info.Engines[1].OK || !info.Features["pull"] || !info.Features["preload"] || strings.Join(info.DownloadEngines, ",") != "lmstudio" {
 		t.Fatalf("info：%+v", info)
 	}
 	_ = s
+}
+
+// waitDownload 等下載工作結束（或逾時）
+func waitDownload(t *testing.T, h http.Handler, token, id string) Download {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out struct{ Downloads []Download }
+		_ = json.NewDecoder(call(h, "GET", "/helper/v1/downloads", token, "").Body).Decode(&out)
+		for _, d := range out.Downloads {
+			if d.ID == id && d.Status != "downloading" {
+				return d
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("下載一直沒結束")
+	return Download{}
+}
+
+func startDownload(t *testing.T, h http.Handler, token, body string) Download {
+	t.Helper()
+	rec := call(h, "POST", "/helper/v1/downloads", token, body)
+	var d Download
+	_ = json.NewDecoder(rec.Body).Decode(&d)
+	if rec.Code != http.StatusAccepted && rec.Code != http.StatusOK {
+		t.Fatalf("開始下載：%d %s", rec.Code, rec.Body)
+	}
+	return d
+}
+
+func TestDownloadWithOllama(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, _, token := setupWithLMStudio(t, ollama.URL)
+	// 沒指定引擎：Ollama 優先
+	d := startDownload(t, h, token, `{"model":"gemma4:e4b"}`)
+	if d.Engine != "ollama" || d.Status != "downloading" || !d.Cancellable {
+		t.Fatalf("%+v", d)
+	}
+	done := waitDownload(t, h, token, d.ID)
+	if done.Status != "done" || done.Total != 1200 || done.Completed != 1200 {
+		t.Fatalf("各層加起來：%+v", done)
+	}
+	// 名稱打錯：說清楚是找不到
+	bad := waitDownload(t, h, token, startDownload(t, h, token, `{"model":"nope"}`).ID)
+	if bad.Status != "failed" || bad.Code != "not_found" {
+		t.Fatalf("%+v", bad)
+	}
+	// 結束的工作可以從清單拿掉
+	if rec := call(h, "DELETE", "/helper/v1/downloads/"+bad.ID, token, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("%d", rec.Code)
+	}
+	var out struct{ Downloads []Download }
+	_ = json.NewDecoder(call(h, "GET", "/helper/v1/downloads", token, "").Body).Decode(&out)
+	if len(out.Downloads) != 1 {
+		t.Fatalf("%+v", out.Downloads)
+	}
+}
+
+func TestDownloadCancelAndDedupe(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{pullStep: 200 * time.Millisecond})
+	defer ollama.Close()
+	s, h := setup(t, ollama.URL)
+	token := pairPhone(t, s, h)
+	d := startDownload(t, h, token, `{"model":"gemma4:31b","engine":"ollama"}`)
+	// 同一個模型再按一次：還是同一個工作
+	if again := startDownload(t, h, token, `{"model":"gemma4:31b"}`); again.ID != d.ID {
+		t.Fatal("重複下載要回同一個工作")
+	}
+	if rec := call(h, "DELETE", "/helper/v1/downloads/"+d.ID, token, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("%d", rec.Code)
+	}
+	if got := waitDownload(t, h, token, d.ID); got.Status != "cancelled" {
+		t.Fatalf("%+v", got)
+	}
+	// 引擎不能下載：說清楚
+	if rec := call(h, "POST", "/helper/v1/downloads", token, `{"model":"x","engine":"lmstudio"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if rec := call(h, "POST", "/helper/v1/downloads", "", `{"model":"x"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatal("要配對過")
+	}
+}
+
+func TestDownloadWithLMStudio(t *testing.T) {
+	pollEvery = 10 * time.Millisecond
+	_, h, lm, token := setupWithLMStudio(t, "http://127.0.0.1:1")
+	d := startDownload(t, h, token, `{"model":"google/gemma-4-e4b"}`)
+	if d.Engine != "lmstudio" || d.Cancellable {
+		t.Fatalf("沒有 Ollama 時用 LM Studio（不能取消）：%+v", d)
+	}
+	if rec := call(h, "DELETE", "/helper/v1/downloads/"+d.ID, token, ""); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("LM Studio 不能取消：%d", rec.Code)
+	}
+	done := waitDownload(t, h, token, d.ID)
+	if done.Status != "done" || done.Total != 3000 || done.Completed != 3000 || lm.Downloads[0] != "google/gemma-4-e4b" {
+		t.Fatalf("%+v %v", done, lm.Downloads)
+	}
+	// 已經下載過的：馬上完成
+	if got := waitDownload(t, h, token, startDownload(t, h, token, `{"model":"google/gemma-3-12b"}`).ID); got.Status != "done" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestTagsTellWhatEachModelCanDo(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	_, h, _, token := setupWithLMStudio(t, ollama.URL)
+	var out struct {
+		Models []struct {
+			Name       string `json:"name"`
+			EngineName string `json:"engine_name"`
+			CanLoad    bool   `json:"can_load"`
+		} `json:"models"`
+	}
+	_ = json.NewDecoder(call(h, "GET", "/api/tags", token, "").Body).Decode(&out)
+	for _, m := range out.Models {
+		if !m.CanLoad || m.EngineName == "" {
+			t.Fatalf("%+v", m)
+		}
+	}
 }

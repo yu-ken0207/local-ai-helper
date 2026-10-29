@@ -32,6 +32,9 @@ type Fake struct {
 	Requests []map[string]any
 	Loads    []string
 	Unloads  []string
+	// Downloads 叫它下載的模型；下載進度每問一次多 1000 bytes，總共 3000
+	Downloads []string
+	polls     int
 }
 
 func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +89,26 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		f.Unloads = append(f.Unloads, fmt.Sprint(b["instance_id"]))
 		writeJSON(w, map[string]any{"instance_id": b["instance_id"]})
+	case r.URL.Path == "/api/v1/models/download" && !f.V0Only && !f.OpenAIOnly:
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		model := fmt.Sprint(b["model"])
+		for _, m := range f.Models {
+			if m.Key == model {
+				writeJSON(w, map[string]any{"status": "already_downloaded"})
+				return
+			}
+		}
+		f.Downloads = append(f.Downloads, model)
+		writeJSON(w, map[string]any{"job_id": "job_1", "status": "downloading", "total_size_bytes": 3000})
+	case r.URL.Path == "/api/v1/models/download/status/job_1":
+		f.polls++
+		done := int64(f.polls * 1000)
+		status := "downloading"
+		if done >= 3000 {
+			done, status = 3000, "completed"
+		}
+		writeJSON(w, map[string]any{"job_id": "job_1", "status": status, "total_size_bytes": 3000, "downloaded_bytes": done})
 	case r.URL.Path == "/v1/models":
 		data := []map[string]any{}
 		for _, m := range f.Models {

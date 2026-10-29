@@ -48,7 +48,7 @@ func (o *OpenAI) Models(ctx context.Context) ([]Model, error) {
 		if m.ID == "" || looksLikeEmbedding(m.ID) {
 			continue
 		}
-		models = append(models, Model{Name: m.ID, DisplayName: m.ID, Engine: o.EngineID})
+		models = append(models, Model{Name: m.ID, DisplayName: m.ID, Engine: o.EngineID, EngineName: o.Label})
 	}
 	return models, nil
 }

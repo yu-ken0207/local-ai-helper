@@ -21,7 +21,11 @@ type Model struct {
 	Name        string
 	DisplayName string
 	Engine      string // 引擎 ID
-	Vision      bool
+	// EngineName 引擎的名稱（LM Studio、llama.cpp、使用者取的名字）；認不出來是空的
+	EngineName string
+	// CanLoad 能不能預先載入／卸載（舊版 LM Studio、OpenAI 格式的伺服器不行）
+	CanLoad bool
+	Vision  bool
 	// Reasoning 可以選的推理程度（LM Studio：off/on/low/medium/high）；空的就是不能調
 	Reasoning     []string
 	ContextLength int

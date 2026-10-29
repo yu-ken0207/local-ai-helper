@@ -90,7 +90,7 @@ func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
 	ollamaOK := s.ollamaJSON(r.Context(), "/api/tags", &ollama) == nil
 	models := []map[string]any{}
 	for _, m := range ollama.Models {
-		m["engine"] = engine.KindOllama
+		m["engine"], m["engine_name"], m["can_load"] = engine.KindOllama, "Ollama", true
 		models = append(models, m)
 	}
 	others := []engine.Model{}
@@ -103,7 +103,7 @@ func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range others {
 		models = append(models, map[string]any{
-			"name": m.Name, "model": m.Name, "size": m.SizeBytes, "engine": m.Engine, "display_name": m.DisplayName,
+			"name": m.Name, "model": m.Name, "size": m.SizeBytes, "engine": m.Engine, "engine_name": m.EngineName, "display_name": m.DisplayName, "can_load": m.CanLoad,
 			"details": map[string]any{"family": m.Family, "parameter_size": m.ParamSize, "quantization_level": m.Quantization},
 		})
 	}
