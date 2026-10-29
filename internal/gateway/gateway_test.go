@@ -15,7 +15,9 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
 	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/engine/enginetest"
+	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
+	"github.com/yu-ken0207/local-ai-helper/internal/system"
 )
 
 // fakeOllama 假的 Ollama：記下收到的請求，/api/chat 一行一行慢慢送
@@ -485,5 +487,45 @@ func TestTagsTellWhatEachModelCanDo(t *testing.T) {
 		if !m.CanLoad || m.EngineName == "" {
 			t.Fatalf("%+v", m)
 		}
+	}
+}
+
+type countInhibitor struct{ on, starts int }
+
+func (c *countInhibitor) Start() error { c.on, c.starts = 1, c.starts+1; return nil }
+func (c *countInhibitor) Stop()        { c.on = 0 }
+
+func TestChatKeepsComputerAwakeAndNotesLANPhones(t *testing.T) {
+	ollama := httptest.NewServer(&fakeOllama{})
+	defer ollama.Close()
+	s, _ := setup(t, ollama.URL)
+	inh := &countInhibitor{}
+	s.Awake = system.NewAwakeWith(inh)
+	h := s.Handler()
+	token := pairPhone(t, s, h)
+	call(h, "GET", "/api/tags", token, "")
+	if inh.starts != 0 {
+		t.Fatal("看模型清單不算在用")
+	}
+	if !s.LANSeen().IsZero() {
+		t.Fatal("測試的位址不是區網")
+	}
+	s.OwnAddrs = func() []netinfo.Addr { return []netinfo.Addr{{IP: "192.168.1.20", Kind: "lan"}} }
+	chatFrom := func(addr string) {
+		req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"model":"gemma4:12b","messages":[]}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.RemoteAddr = addr
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	chatFrom("192.168.1.20:52000")
+	if !s.LANSeen().IsZero() {
+		t.Fatal("電腦自己用區網位址連自己不算")
+	}
+	chatFrom("192.168.1.5:52000")
+	if inh.starts != 1 || inh.on != 1 || !s.Awake.Status().Active {
+		t.Fatal("聊天時不讓電腦睡")
+	}
+	if s.LANSeen().IsZero() {
+		t.Fatal("區網的手機連進來要記下（證明防火牆沒擋）")
 	}
 }

@@ -49,6 +49,8 @@ type Config struct {
 	// Servers 使用者自己加的 OpenAI 格式伺服器
 	Servers []Server `json:"servers"`
 	Devices []Device `json:"devices"`
+	// NoAutostart 使用者在管理頁關掉了開機自動啟動（預設會開）
+	NoAutostart bool `json:"noAutostart,omitempty"`
 }
 
 // Server 使用者在管理頁加的 OpenAI 格式伺服器（llama.cpp、vLLM…）

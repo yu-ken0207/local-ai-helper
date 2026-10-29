@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
+	"github.com/yu-ken0207/local-ai-helper/internal/system"
 )
 
 func newServer(t *testing.T) (*Server, http.Handler) {
@@ -203,5 +205,50 @@ func TestInstallOllama(t *testing.T) {
 	// 要帶 X-Local-AI（別的網站不能叫它裝東西）
 	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/ollama/install", "", nil); rec.Code != http.StatusForbidden {
 		t.Fatalf("%d", rec.Code)
+	}
+}
+
+func TestAutostartFirewallAwake(t *testing.T) {
+	s, h := newServer(t)
+	calls := []bool{}
+	s.Exe = "/opt/lai/helper"
+	s.SetAutostart = func(on bool, exe string) error {
+		calls = append(calls, on)
+		return nil
+	}
+	s.Firewall = func(port int, exe string) system.FirewallStatus {
+		return system.FirewallStatus{Kind: "ufw", Open: "unknown", Command: fmt.Sprintf("sudo ufw allow %d/tcp", port)}
+	}
+	var seen time.Time
+	s.LANSeen = func() time.Time { return seen }
+	s.Awake = system.NewAwakeWith(nil)
+	status := func() Status {
+		var st Status
+		_ = json.NewDecoder(do(h, "GET", "127.0.0.1:11481", "/admin/api/status", "", nil).Body).Decode(&st)
+		return st
+	}
+	st := status()
+	if st.Autostart == nil || !st.Autostart.Enabled || st.Firewall.Command != "sudo ufw allow 11480/tcp" || st.Awake == nil {
+		t.Fatalf("%+v %+v", st.Autostart, st.Firewall)
+	}
+	// 關掉開機自動啟動：記在設定裡
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/autostart", `{"enabled":false}`, map[string]string{"X-Local-AI": "1"}); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if !s.Store.Get().NoAutostart || len(calls) != 1 || calls[0] || status().Autostart.Enabled {
+		t.Fatal("要關掉並記住")
+	}
+	// 區網的手機連進來過：防火牆一定沒擋，不再提示
+	seen = time.Now()
+	if fw := status().Firewall; fw.Open != "yes" {
+		t.Fatalf("%+v", fw)
+	}
+	// 用 --config-dir 開的（測試）：不管開機啟動
+	s.SetAutostart = nil
+	if status().Autostart != nil {
+		t.Fatal("測試用的不顯示開機啟動")
+	}
+	if rec := do(h, "POST", "127.0.0.1:11481", "/admin/api/firewall/allow", "", map[string]string{"X-Local-AI": "1"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("沒有放行的方法：%d", rec.Code)
 	}
 }

@@ -56,6 +56,10 @@
   .install p { margin: 0 0 10px; }
   .track { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 8px 0 4px; }
   .fill { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+  .cmd { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: 14px/1.6 var(--mono); padding: 8px 10px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); }
+  label.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; cursor: pointer; }
+  label.check input { flex: none; width: 18px; height: 18px; accent-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -87,6 +91,7 @@
       <ul class="devices" id="devices"></ul>
       <p id="noDevices" class="hint" data-t="noDevices" hidden></p>
       <button class="primary" id="startPairing" data-t="pair"></button>
+      <p id="awake" class="hint" hidden></p>
     </div>
   </section>
 
@@ -122,10 +127,12 @@
       <button type="button" id="cancelRename" data-t="cancel"></button>
     </form>
     <p class="hint" data-t="nameHint"></p>
+    <label class="check" id="autostartRow" hidden><input type="checkbox" id="autostart"><span data-t="autostart"></span></label>
   </section>
 
   <section>
     <h2 data-t="addresses"></h2>
+    <div id="firewallBox" class="install" hidden style="margin: 0 0 12px"></div>
     <div id="addrs" class="addr">…</div>
     <p class="hint" data-t="addrHint"></p>
   </section>
@@ -198,6 +205,20 @@ const T = zh ? {
   save: '儲存',
   cancel: '取消',
   nameHint: '手機上會用這個名字顯示這台電腦。',
+  autostart: '開機時自動打開小幫手',
+  awakeOn: '手機正在使用，這段時間電腦不會睡著（螢幕照常會關）。',
+  awakeError: (e) => `系統不讓小幫手在手機使用中擋住睡眠，電腦可能會睡著。${/denied/i.test(e) ? '從桌面登入後打開小幫手（或開機自動打開）就可以。' : ''}（${e}）`,
+  fwLinux: (k) => `這台電腦開著防火牆（${k}），手機可能連不進來。請在終端機執行下面這一行（要輸入電腦的密碼）：`,
+  fwLinuxBlocked: (k) => `這台電腦的防火牆（${k}）擋著手機。請在終端機執行下面這一行（要輸入電腦的密碼）：`,
+  fwSeenHint: '手機連進來過之後，這個提示就會消失。',
+  copy: '複製',
+  copied: '已複製',
+  fwWindows: 'Windows 防火牆可能會擋住手機。',
+  fwAllow: '允許手機連進來',
+  fwAllowHint: '會跳出 Windows 的確認視窗，請按「是」。只在家裡或公司的網路放行，咖啡廳那種公用網路不會。',
+  fwWaiting: '等待 Windows 確認…',
+  fwFailed: '沒有放行成功',
+  fwPublic: 'Windows 把目前的網路當成「公用網路」，手機連不進來。請到「設定」的「網路和網際網路」，點目前的網路，把網路類型改成「私人網路」。',
   addresses: '手機連線位址',
   addrHint: '手機要跟這台電腦連同一個 Wi-Fi。',
   noAddr: '找不到區網位址，請確認這台電腦有連上網路。',
@@ -266,6 +287,20 @@ const T = zh ? {
   save: 'Save',
   cancel: 'Cancel',
   nameHint: 'Phones show this computer by this name.',
+  autostart: 'Open the helper when this computer starts',
+  awakeOn: "A phone is using this computer, so it won't sleep for now (the screen still turns off).",
+  awakeError: (e) => `The system won't let the helper keep this computer awake while a phone is using it, so it may go to sleep.${/denied/i.test(e) ? ' Open the helper after signing in to the desktop (or let it open at startup).' : ''} (${e})`,
+  fwLinux: (k) => `This computer's firewall (${k}) is on, so phones may not get through. Run this line in a terminal (it asks for your password):`,
+  fwLinuxBlocked: (k) => `This computer's firewall (${k}) is blocking phones. Run this line in a terminal (it asks for your password):`,
+  fwSeenHint: 'This message goes away once a phone has connected.',
+  copy: 'Copy',
+  copied: 'Copied',
+  fwWindows: 'Windows Firewall may block phones.',
+  fwAllow: 'Let Phones Connect',
+  fwAllowHint: 'Windows will ask for permission; choose Yes. Only home and work networks are allowed, not public ones like cafés.',
+  fwWaiting: 'Waiting for Windows…',
+  fwFailed: "Couldn't allow phones",
+  fwPublic: 'Windows treats this network as a "Public network", so phones can\'t connect. In Settings, open Network & internet, select this network, and set the network profile type to "Private network".',
   addresses: 'Addresses for phones',
   addrHint: 'Phones need to be on the same Wi-Fi as this computer.',
   noAddr: 'No local network address found. Check that this computer is connected.',
@@ -371,6 +406,18 @@ function render(st) {
   }
   renderOllama(st, othersOk);
 
+  // 使用中不睡眠
+  const aw = $('awake');
+  aw.hidden = !(st.awake?.active || st.awake?.error);
+  aw.className = st.awake?.error ? 'hint warn' : 'hint ok';
+  aw.textContent = st.awake?.error ? T.awakeError(st.awake.error) : T.awakeOn;
+
+  // 開機自動啟動
+  $('autostartRow').hidden = !st.autostart;
+  if (st.autostart && document.activeElement !== $('autostart')) $('autostart').checked = st.autostart.enabled;
+
+  renderFirewall(st.firewall);
+
   // 這台電腦
   if ($('nameEdit').hidden) $('name').textContent = st.name;
   $('version').textContent = `${T.version} ${st.version}`;
@@ -387,6 +434,69 @@ function render(st) {
       line.append(tag);
     }
     addrs.append(line);
+  }
+}
+
+// 防火牆：Linux 給指令（要 sudo，小幫手不代勞）；Windows 一個按鈕跳出系統確認
+let fwBusy = false;
+function renderFirewall(fw) {
+  const box = $('firewallBox');
+  if (fwBusy) return;
+  box.replaceChildren();
+  box.hidden = true;
+  if (!fw || !fw.kind) return;
+  const p = (text, cls) => {
+    const el = document.createElement('p');
+    el.textContent = text;
+    if (cls) el.className = cls;
+    return el;
+  };
+  if (fw.publicNetwork) {
+    box.hidden = false;
+    box.append(p(T.fwPublic, 'warn'));
+  }
+  if (fw.open === 'yes') return;
+  box.hidden = false;
+  if (fw.command) {
+    box.append(p(fw.open === 'no' ? T.fwLinuxBlocked(fw.kind) : T.fwLinux(fw.kind)));
+    const row = document.createElement('div');
+    row.className = 'cmd';
+    const code = document.createElement('code');
+    code.textContent = fw.command;
+    const copy = document.createElement('button');
+    copy.textContent = T.copy;
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(fw.command);
+      } catch {
+        const r = document.createRange();
+        r.selectNodeContents(code);
+        getSelection().removeAllRanges();
+        getSelection().addRange(r);
+        document.execCommand('copy');
+      }
+      copy.textContent = T.copied;
+      setTimeout(() => (copy.textContent = T.copy), 1500);
+    };
+    row.append(code, copy);
+    box.append(row, p(T.fwSeenHint, 'hint'));
+  } else if (fw.canFix) {
+    const b = document.createElement('button');
+    b.className = 'primary';
+    b.textContent = T.fwAllow;
+    b.onclick = async () => {
+      fwBusy = true;
+      b.disabled = true;
+      b.textContent = T.fwWaiting;
+      const r = await fetch('/admin/api/firewall/allow', { method: 'POST', headers: { 'X-Local-AI': '1' } });
+      fwBusy = false;
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        alert(`${T.fwFailed}\n${e.error || ''}`);
+      }
+      refresh();
+    };
+    box.append(p(T.fwWindows), b, p(T.fwAllowHint, 'hint'));
   }
 }
 
@@ -542,6 +652,11 @@ $('nameEdit').onsubmit = async (e) => {
   $('nameEdit').hidden = true;
   $('nameView').hidden = false;
   refresh();
+};
+$('autostart').onchange = async (e) => {
+  const next = await post('/admin/api/autostart', { enabled: e.target.checked });
+  if (next) render(next);
+  else refresh();
 };
 $('quitBtn').onclick = async () => {
   if (!confirm(T.quitConfirm)) return;

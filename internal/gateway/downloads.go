@@ -162,6 +162,8 @@ func (s *Server) startDownload(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer cancel()
+		// 下載中電腦不能睡
+		defer s.Awake.Hold()()
 		var err error
 		if j.Engine == engine.KindOllama {
 			err = s.pullOllama(ctx, j)

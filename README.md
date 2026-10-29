@@ -7,12 +7,18 @@
 - 點兩下打開：瀏覽器跳出「Local AI 小幫手」管理頁（只有這台電腦看得到），系統匣有圖示可以再打開或結束
 - 管理頁：配對新手機（QR code＋6 位數配對碼，開放 5 分鐘）、已配對的手機（最近使用、移除）、AI 引擎狀態、這台電腦的名稱（可改）、手機連線位址
 - 已經開著再點一次：只會把管理頁叫出來，不會開第二個
+- 開機自動打開（預設開，管理頁「這台電腦」可以關）；開機打開時不跳出管理頁
+- 手機在聊天、載入模型、下載時，電腦不會睡著（用完再撐 10 分鐘；螢幕照常會關）
+- 防火牆擋住手機時：Windows 按「允許手機連進來」（跳出系統確認，只放行家用與公司網路）；Linux 顯示一行可以複製的指令（要 sudo，小幫手不代勞）；Windows 把網路當成「公用網路」時教使用者改成私人網路。區網的手機連進來過，提示就消失
 
 ## 設計
 
 - 手機只跟小幫手講話（要帶配對時拿到的權杖），小幫手再接後面的引擎：Ollama（預設，沒有就一鍵安裝）、LM Studio、OpenAI 格式的伺服器（llama.cpp、vLLM、Jan…）
 - 一鍵安裝 Ollama（管理頁「安裝 Ollama」）：不用官方安裝程式（Windows 會多一個系統匣圖示、Linux 要 sudo），改下載 GitHub 上官方發佈的壓縮檔（Linux `.tar.zst`、Windows `.zip`，約 1.6 GB），**比對官方 `sha256sum.txt`** 後解到使用者資料夾（Windows `%LOCALAPPDATA%\local-ai-helper\ollama`、Linux `~/.local/share/local-ai-helper/ollama`），不用管理員權限。先解到旁邊的資料夾、全部成功才換上去；擋掉路徑或連結跑到資料夾外面的檔案；磁碟要有壓縮檔三倍的空間。Jetson 與 AMD 顯示卡（Linux）照官方 install.sh 多疊 jetpack／rocm 套件
 - 小幫手裝的 Ollama 由小幫手開著（`ollama serve`，輸出寫到設定資料夾的 `ollama.log`）：小幫手啟動時自動開、意外結束 3 秒後重開（一分鐘內連續失敗 5 次就停，管理頁顯示原因與「打開 Ollama」）、小幫手結束一起關；Linux 用 Pdeathsig、Windows 用 Job Object，小幫手當掉也不會留下 Ollama。使用者自己裝的 Ollama 不會被蓋掉（沒開時管理頁有「打開 Ollama」；Windows 打開它自己的 `ollama app.exe`）
+- 開機自動啟動：Windows 寫使用者自己的 `HKCU\...\Run`（不用管理員；工作管理員的「啟動」看得到）；Linux 寫 `~/.config/autostart/local-ai-helper.desktop`（桌面登入時打開）。每次啟動都重寫，執行檔搬了位置也跟著改；用 `--config-dir` 開的（測試）不動開機設定
+- 使用中不睡眠：聊天、預先載入、下載期間擋住，用完再撐 10 分鐘。Windows 用 `SetThreadExecutionState`（固定一條執行緒）；Linux 開 `systemd-inhibit --what=sleep:idle`，不等它（聊天不變慢），它自己結束（沒權限）就在管理頁說明
+- 防火牆：Linux 看 `/etc/ufw/ufw.conf` 與 firewalld 有沒有在跑（一般使用者讀不到 ufw 規則，只能說「不確定」）；Windows 用 `netsh` 看有沒有「Local AI Helper」規則、PowerShell 看網路類型。放行時先刪掉這個程式的其他規則（第一次開時在 Windows 的提示按取消會留下封鎖規則，封鎖比放行優先）。有區網的手機（不算電腦自己）連進來過就當作沒擋
 - 系統沒有根憑證時（精簡的 Linux）用 Go 內建的一份（`x509roots/fallback`），下載才連得上 HTTPS
 - 引擎：Ollama 原樣轉送；LM Studio 用原生 API 列模型（0.4 起 `/api/v1/models`，舊版 `/api/v0/models`）與載入／卸載，聊天走 OpenAI 格式；其他 OpenAI 格式伺服器在常見連接埠（8080、8000、1337、4891、5000）自動偵測（看 `/v1/models` 的格式與 `owned_by`），也可以在管理頁手動加（網址、名稱、API 金鑰）
 - 模型清單合併所有引擎，每個模型多 `engine`、`engine_name`、`can_load`（能不能預先載入）；跟 Ollama 撞名的改叫「名稱@引擎」（Ollama 的名稱永遠不變）；聊天時依名稱找回引擎，OpenAI 的串流（含 `reasoning_content`、用量）翻回 Ollama 的逐行格式；圖片轉成 `image_url`
@@ -59,6 +65,7 @@ internal/admin/        本機管理頁與 API（page/index.html 內嵌，中英�
 internal/gateway/      手機連的門口：hello、配對、權杖檢查、依模型轉給對的引擎、下載工作（downloads.go）
 internal/engine/       LM Studio、OpenAI 格式伺服器：偵測、模型清單、聊天翻譯、載入／卸載、LM Studio 下載（enginetest/ 是假引擎）
 internal/hardware/     記憶體、NVIDIA 顯示卡
+internal/system/       開機自動啟動、使用中不睡眠、防火牆（Windows／Linux 各自的實作）
 internal/ollama/       一鍵安裝 Ollama（下載、比對官方檢查碼、解開）與開著它（自動重開）
 internal/pairing/      配對時段、配對碼、權杖（只存雜湊）、QR code
 internal/netinfo/      找手機連得到的位址（排除 Docker、WSL 等虛擬網卡）
@@ -76,12 +83,16 @@ internal/tray/         系統匣圖示
 | 4 | 接 LM Studio 與 OpenAI 格式的伺服器 | 完成（Linux 實機測試 LM Studio 0.4 llmster：合併清單、看圖聊天、載入／卸載） |
 | 5 | App：依引擎隱藏做不到的功能、在手機下載模型與推薦（硬體偵測提前在這步做） | 完成（Linux 實機測試：Ollama 下載進度與取消、LM Studio 下載進度、名稱打錯；配備回報 GB10 共用記憶體） |
 | 6 | 一鍵安裝 Ollama | 完成（Linux 乾淨容器實測：下載 1.6 GB、比對檢查碼、解開、開起來、偵測到 GB10、跑模型；強制結束會自動重開、小幫手重開會自動開 Ollama；管理頁每個狀態截圖確認。Windows 待測試機） |
-| 7 | 開機自動啟動、使用中不睡眠、防火牆 | |
+| 7 | 開機自動啟動、使用中不睡眠、防火牆 | 完成（Linux 實機測試：開機啟動檔建立與關掉、ufw 偵測與放行指令、聊天時擋睡眠在非桌面登入下被拒並正確說明；管理頁截圖確認。Windows 待測試機） |
 | 8 | App：連不到時說得更準、第一次載入的等待說明 | |
 
 ## 已知問題
 
-- **Linux 有開防火牆（ufw）時，區網的手機連不進 11480**（例如 11434 有放行、11480 沒有；Tailscale 不受影響）。第 7 步會偵測並教使用者放行。
+- **Linux 有開防火牆（ufw）時，區網的手機連不進 11480**（例如 11434 有放行、11480 沒有；Tailscale 不受影響）。管理頁會顯示放行指令，要使用者自己執行（要 sudo）。
+
+- **Linux 的「使用中不睡眠」要小幫手是從桌面登入開的**（開機自動打開就是）；從 SSH 或背景開的會被系統拒絕（管理頁會說明）。
+
+- **睡著的電腦手機叫不醒**：要網路喚醒（Wake-on-LAN，要先到 BIOS 打開），還沒做。
 
 - **LM Studio 從 Hugging Face 下載，很慢**（實測約 0.3 MB/s；Ollama 同一台約 28 MB/s）。LM Studio 沒有取消下載的 API，要取消只能在 LM Studio 裡按。
 

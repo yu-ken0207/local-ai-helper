@@ -17,6 +17,7 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
+	"github.com/yu-ken0207/local-ai-helper/internal/system"
 )
 
 //go:embed page/index.html
@@ -41,6 +42,18 @@ type Server struct {
 	Addrs func() []netinfo.Addr
 	// Ollama 幫忙裝、開 Ollama；nil 就不提供
 	Ollama *ollama.Manager
+	// Exe 小幫手的執行檔（開機啟動、防火牆規則用）；空的就不管開機啟動與防火牆
+	Exe string
+	// SetAutostart 開關開機自動啟動（測試可以換）
+	SetAutostart func(enabled bool, exe string) error
+	// Firewall 防火牆狀態（測試可以換）
+	Firewall func(port int, exe string) system.FirewallStatus
+	// AllowFirewall 放行（Windows 會跳出系統的權限確認）
+	AllowFirewall func(port int, exe string) error
+	// Awake 手機使用中不讓電腦睡
+	Awake *system.Awake
+	// LANSeen 區網的手機最近一次連進來的時間
+	LANSeen func() time.Time
 }
 
 type Status struct {
@@ -55,6 +68,12 @@ type Status struct {
 	Paired   *DeviceView    `json:"paired,omitempty"`
 	Engines  []engine.Info  `json:"engines"`
 	Ollama   *ollama.Status `json:"ollama,omitempty"`
+	// Autostart 開機自動啟動（nil：這次不是用預設設定資料夾開的，不管開機啟動）
+	Autostart *struct {
+		Enabled bool `json:"enabled"`
+	} `json:"autostart,omitempty"`
+	Firewall *system.FirewallStatus `json:"firewall,omitempty"`
+	Awake    *system.AwakeStatus    `json:"awake,omitempty"`
 }
 
 type DeviceView struct {
@@ -122,6 +141,8 @@ func (s *Server) Handler() http.Handler {
 		s.redetect()
 		s.status(w, r)
 	})
+	mux.HandleFunc("POST /admin/api/autostart", s.autostart)
+	mux.HandleFunc("POST /admin/api/firewall/allow", s.allowFirewall)
 	mux.HandleFunc("POST /admin/api/ollama/install", s.installOllama)
 	mux.HandleFunc("POST /admin/api/ollama/start", s.startOllama)
 	mux.HandleFunc("POST /admin/api/quit", func(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +187,61 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		o := s.Ollama.Status()
 		st.Ollama = &o
 	}
+	if s.Exe != "" && s.SetAutostart != nil {
+		st.Autostart = &struct {
+			Enabled bool `json:"enabled"`
+		}{Enabled: !c.NoAutostart}
+	}
+	if s.Exe != "" && s.Firewall != nil {
+		fw := s.Firewall(c.APIPort, s.Exe)
+		// 區網的手機連進來過：防火牆一定沒擋
+		if s.LANSeen != nil && !s.LANSeen().IsZero() {
+			fw.Open, fw.CanFix = "yes", false
+		}
+		st.Firewall = &fw
+	}
+	if s.Awake != nil {
+		a := s.Awake.Status()
+		st.Awake = &a
+	}
 	writeJSON(w, st)
+}
+
+// autostart 管理頁的「開機時自動打開小幫手」
+func (s *Server) autostart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if s.Exe == "" || s.SetAutostart == nil {
+		writeError(w, http.StatusNotFound, "unsupported", "not available")
+		return
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid body")
+		return
+	}
+	if err := s.SetAutostart(body.Enabled, s.Exe); err != nil {
+		writeError(w, http.StatusInternalServerError, "autostart_failed", err.Error())
+		return
+	}
+	if err := s.Store.Update(func(c *config.Config) { c.NoAutostart = !body.Enabled }); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	s.status(w, r)
+}
+
+// allowFirewall Windows：跳出系統的權限確認放行手機；等使用者按完才回應
+func (s *Server) allowFirewall(w http.ResponseWriter, r *http.Request) {
+	if s.Exe == "" || s.AllowFirewall == nil {
+		writeError(w, http.StatusNotFound, "unsupported", "not available")
+		return
+	}
+	if err := s.AllowFirewall(s.Store.Get().APIPort, s.Exe); err != nil {
+		writeError(w, http.StatusBadGateway, "firewall_failed", err.Error())
+		return
+	}
+	s.status(w, r)
 }
 
 func (s *Server) ollamaUp(r *http.Request) bool {

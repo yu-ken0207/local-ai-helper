@@ -7,16 +7,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yu-ken0207/local-ai-helper/internal/config"
 	"github.com/yu-ken0207/local-ai-helper/internal/engine"
 	"github.com/yu-ken0207/local-ai-helper/internal/hardware"
+	"github.com/yu-ken0207/local-ai-helper/internal/netinfo"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
+	"github.com/yu-ken0207/local-ai-helper/internal/system"
 )
 
 // AppID hello 回應裡的識別字，App 用它分辨是不是小幫手
@@ -34,8 +38,14 @@ type Server struct {
 	OllamaURL string
 	// Registry 其他引擎（LM Studio、OpenAI 格式的伺服器）；nil 就只用 Ollama
 	Registry *engine.Registry
+	// Awake 手機在用時不讓電腦睡著；nil 就不管
+	Awake *system.Awake
+	// OwnAddrs 這台電腦自己的位址（測試可以換）
+	OwnAddrs func() []netinfo.Addr
 
 	dl downloads
+	// lanSeen 最近一次有區網的手機連進來（Unix 秒）：證明防火牆沒擋
+	lanSeen atomic.Int64
 }
 
 type Hello struct {
@@ -97,9 +107,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/tags", s.auth(http.HandlerFunc(s.tags)))
 	mux.Handle("POST /api/show", s.auth(s.withBody(s.show)))
 	mux.Handle("GET /api/ps", s.auth(http.HandlerFunc(s.ps)))
-	mux.Handle("POST /api/chat", s.auth(s.withBody(s.chat)))
-	mux.Handle("POST /api/generate", s.auth(s.withBody(s.generate)))
-	mux.Handle("POST /api/pull", s.auth(s.withBody(func(w http.ResponseWriter, r *http.Request, body []byte) { s.toOllama(w, r, body) })))
+	mux.Handle("POST /api/chat", s.auth(s.inUse(s.withBody(s.chat))))
+	mux.Handle("POST /api/generate", s.auth(s.inUse(s.withBody(s.generate))))
+	mux.Handle("POST /api/pull", s.auth(s.inUse(s.withBody(func(w http.ResponseWriter, r *http.Request, body []byte) { s.toOllama(w, r, body) }))))
 	// 其他 Ollama API（刪除、建立、推送模型…）一律不轉
 	mux.Handle("/api/", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_allowed", "this API is not available through the helper")
@@ -192,8 +202,46 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "not_paired", "this phone is not paired (or was removed)")
 			return
 		}
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && s.fromLANPhone(host) {
+			s.lanSeen.Store(time.Now().Unix())
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), deviceKey{}, dev)))
 	})
+}
+
+// inUse 聊天、載入模型時不讓電腦睡著（回答完還會再撐一陣子）
+func (s *Server) inUse(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		release := s.Awake.Hold()
+		defer release()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// fromLANPhone 從區網的別台裝置連進來（不算這台電腦自己用區網位址連自己）
+func (s *Server) fromLANPhone(host string) bool {
+	ip := net.ParseIP(host)
+	if netinfo.Classify(ip, "") != "lan" {
+		return false
+	}
+	own := s.OwnAddrs
+	if own == nil {
+		own = netinfo.LAN
+	}
+	for _, a := range own() {
+		if a.IP == ip.String() {
+			return false
+		}
+	}
+	return true
+}
+
+// LANSeen 區網的手機最近一次連進來的時間（沒有過是零）
+func (s *Server) LANSeen() time.Time {
+	if t := s.lanSeen.Load(); t > 0 {
+		return time.Unix(t, 0)
+	}
+	return time.Time{}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

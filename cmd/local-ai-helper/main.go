@@ -27,6 +27,7 @@ import (
 	"github.com/yu-ken0207/local-ai-helper/internal/ollama"
 	"github.com/yu-ken0207/local-ai-helper/internal/pairing"
 	"github.com/yu-ken0207/local-ai-helper/internal/platform"
+	"github.com/yu-ken0207/local-ai-helper/internal/system"
 	"github.com/yu-ken0207/local-ai-helper/internal/tray"
 
 	// 系統沒有根憑證時（精簡的 Linux）用 Go 內建的一份，下載 Ollama 才連得上 HTTPS
@@ -90,6 +91,28 @@ func main() {
 	}
 	gw := &gateway.Server{Store: store, Pairing: pair, Version: version, OllamaURL: cfg.OllamaURL, Registry: registry}
 
+	// 手機使用中不讓電腦睡著
+	awake := system.NewAwake()
+	awakeCtx, stopAwake := context.WithCancel(context.Background())
+	go awake.Run(awakeCtx)
+	defer stopAwake()
+	defer awake.Stop()
+	gw.Awake = awake
+
+	// 開機自動啟動（預設開；用 --config-dir 開的是測試，不動開機設定）
+	exe, err := system.Executable()
+	if err != nil {
+		log.Printf("找不到自己的執行檔：%v", err)
+	}
+	setAutostart := system.SetAutostart
+	if *configDir != "" {
+		setAutostart = nil
+	} else if exe != "" {
+		if err := system.SetAutostart(!cfg.NoAutostart, exe); err != nil {
+			log.Printf("設定開機自動啟動失敗：%v", err)
+		}
+	}
+
 	// 小幫手裝的 Ollama：開著小幫手就開著它（結束時一起關）
 	var olm *ollama.Manager
 	if olDir, err := ollama.DefaultDir(); err == nil {
@@ -125,6 +148,7 @@ func main() {
 	adminSrv := &http.Server{
 		Handler: (&admin.Server{
 			Store: store, Pairing: pair, Version: version, Quit: quit, Addrs: netinfo.LAN, Engines: gw.Engines, Redetect: registry.Redetect, Ollama: olm,
+			Exe: exe, SetAutostart: setAutostart, Firewall: system.Firewall, AllowFirewall: system.AllowFirewall, Awake: awake, LANSeen: gw.LANSeen,
 			APIError: func() string {
 				apiErr.Lock()
 				defer apiErr.Unlock()
