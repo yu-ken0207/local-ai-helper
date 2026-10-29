@@ -85,3 +85,26 @@ func TestSystemdInhibitHere(t *testing.T) {
 		t.Fatal("我們自己關掉的不算錯")
 	}
 }
+
+func TestLauncherInAppMenu(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := InstallLauncher("/opt/lai/local-ai-helper"); err != nil {
+		t.Fatal(err)
+	}
+	dir := os.Getenv("XDG_DATA_HOME")
+	entry, err := os.ReadFile(filepath.Join(dir, "applications", "local-ai-helper.desktop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	icon := filepath.Join(dir, "local-ai-helper", "icon.png")
+	if !strings.Contains(string(entry), `Exec="/opt/lai/local-ai-helper"`+"\n") || !strings.Contains(string(entry), "Icon="+icon) || !strings.Contains(string(entry), "Name[zh_TW]=Local AI 小幫手") {
+		t.Fatalf("%s", entry)
+	}
+	if st, err := os.Stat(icon); err != nil || st.Size() == 0 {
+		t.Fatal("圖示要放好")
+	}
+	// 從選單打開要跳出管理頁：不能帶 --no-browser
+	if strings.Contains(string(entry), "--no-browser") {
+		t.Fatal("選單打開要看到管理頁")
+	}
+}

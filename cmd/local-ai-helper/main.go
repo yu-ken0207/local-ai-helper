@@ -61,6 +61,24 @@ func main() {
 	adminURL := admin.URL(cfg.AdminPort)
 	showPage := !*noBrowser && platform.HasDesktop()
 
+	// 開機自動啟動（預設開；用 --config-dir 開的是測試，不動開機設定）
+	exe, err := system.Executable()
+	if err != nil {
+		log.Printf("找不到自己的執行檔：%v", err)
+	}
+	setAutostart := system.SetAutostart
+	if *configDir != "" {
+		setAutostart = nil
+	} else if exe != "" {
+		if err := system.SetAutostart(!cfg.NoAutostart, exe); err != nil {
+			log.Printf("設定開機自動啟動失敗：%v", err)
+		}
+		// 應用程式選單／開始功能表：結束之後不用打指令就能再打開（已經有一個在跑也照樣放）
+		if err := system.InstallLauncher(exe); err != nil {
+			log.Printf("放進應用程式選單失敗：%v", err)
+		}
+	}
+
 	// 只開一個：連接埠已經被自己佔住，就把管理頁叫出來後結束
 	adminLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort))
 	if err != nil {
@@ -98,20 +116,6 @@ func main() {
 	defer stopAwake()
 	defer awake.Stop()
 	gw.Awake = awake
-
-	// 開機自動啟動（預設開；用 --config-dir 開的是測試，不動開機設定）
-	exe, err := system.Executable()
-	if err != nil {
-		log.Printf("找不到自己的執行檔：%v", err)
-	}
-	setAutostart := system.SetAutostart
-	if *configDir != "" {
-		setAutostart = nil
-	} else if exe != "" {
-		if err := system.SetAutostart(!cfg.NoAutostart, exe); err != nil {
-			log.Printf("設定開機自動啟動失敗：%v", err)
-		}
-	}
 
 	// 小幫手裝的 Ollama：開著小幫手就開著它（結束時一起關）
 	var olm *ollama.Manager

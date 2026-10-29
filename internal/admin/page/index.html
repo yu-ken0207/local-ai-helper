@@ -146,6 +146,7 @@
 </main>
 <script>
 const zh = (navigator.language || '').toLowerCase().startsWith('zh');
+const isWin = /Windows/i.test(navigator.userAgent);
 const T = zh ? {
   title: 'Local AI 小幫手',
   subtitle: '讓家裡的手機用這台電腦上的 AI 模型。這個頁面只有這台電腦看得到。',
@@ -224,9 +225,9 @@ const T = zh ? {
   noAddr: '找不到區網位址，請確認這台電腦有連上網路。',
   vpn: 'Tailscale',
   apiError: (e) => `手機連不進來：連接埠被別的程式佔用或沒有權限（${e}）。`,
-  offline: '小幫手已經結束。要再用請重新打開小幫手。',
+  offline: (win) => `小幫手已經結束。要再打開：${win ? '在「開始」功能表找「Local AI 小幫手」' : '在應用程式選單搜尋「Local AI 小幫手」'}。`,
   quit: '結束小幫手',
-  quitConfirm: '結束後手機就連不到這台電腦。確定要結束嗎？',
+  quitConfirm: (win) => `結束後手機就連不到這台電腦。\n之後要再打開：${win ? '在「開始」功能表找「Local AI 小幫手」' : '在應用程式選單搜尋「Local AI 小幫手」'}（有勾「開機時自動打開」的話，下次開機也會自己打開）。\n\n確定要結束嗎？`,
   version: '版本',
 } : {
   title: 'Local AI Helper',
@@ -306,14 +307,17 @@ const T = zh ? {
   noAddr: 'No local network address found. Check that this computer is connected.',
   vpn: 'Tailscale',
   apiError: (e) => `Phones can't connect: the port is in use by another program or not permitted (${e}).`,
-  offline: 'The helper has quit. Open it again to keep using it.',
+  offline: (win) => `The helper has quit. To open it again, ${win ? 'find "Local AI Helper" in the Start menu' : 'search for "Local AI Helper" in your app menu'}.`,
   quit: 'Quit Helper',
-  quitConfirm: "Phones won't be able to reach this computer after you quit. Quit anyway?",
+  quitConfirm: (win) => `Phones won't be able to reach this computer after you quit.\nTo open it again later, ${win ? 'find "Local AI Helper" in the Start menu' : 'search for "Local AI Helper" in your app menu'} (it also opens at startup if "Open the helper when this computer starts" is checked).\n\nQuit anyway?`,
   version: 'Version',
 };
 document.documentElement.lang = zh ? 'zh-Hant' : 'en';
 document.title = T.title;
-for (const el of document.querySelectorAll('[data-t]')) el.textContent = T[el.dataset.t];
+for (const el of document.querySelectorAll('[data-t]')) {
+  const v = T[el.dataset.t];
+  el.textContent = typeof v === 'function' ? v(isWin) : v;
+}
 
 const $ = (id) => document.getElementById(id);
 const post = (path, body) =>
@@ -659,7 +663,7 @@ $('autostart').onchange = async (e) => {
   else refresh();
 };
 $('quitBtn').onclick = async () => {
-  if (!confirm(T.quitConfirm)) return;
+  if (!confirm(T.quitConfirm(isWin))) return;
   await post('/admin/api/quit').catch(() => {});
   setTimeout(refresh, 500);
 };
