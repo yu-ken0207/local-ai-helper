@@ -161,6 +161,7 @@ func TestInstallRefusesBadDownloads(t *testing.T) {
 	good := tarZst(t, []entry{{name: "bin/ollama", body: "x", mode: 0o755}})
 	evil := tarZst(t, []entry{{name: "../../evil", body: "x", mode: 0o644}})
 	evilLink := tarZst(t, []entry{{name: "bin/ollama", link: "/etc/passwd"}})
+	evilBackslash := tarZst(t, []entry{{name: "bin/ollama", link: `\Windows\System32\evil.dll`}})
 	cases := []struct {
 		name  string
 		files map[string][]byte
@@ -172,6 +173,7 @@ func TestInstallRefusesBadDownloads(t *testing.T) {
 		{"磁碟不夠", map[string][]byte{"ollama-linux-amd64.tar.zst": good}, nil, 10, "disk_full"},
 		{"路徑跑到外面", map[string][]byte{"ollama-linux-amd64.tar.zst": evil}, nil, 1 << 40, "extract"},
 		{"連結指到外面", map[string][]byte{"ollama-linux-amd64.tar.zst": evilLink}, nil, 1 << 40, "extract"},
+		{"連結從根目錄開始（Windows 寫法）", map[string][]byte{"ollama-linux-amd64.tar.zst": evilBackslash}, nil, 1 << 40, "extract"},
 		{"官方沒有這個檔案", map[string][]byte{}, nil, 1 << 40, "checksum"},
 	}
 	for _, c := range cases {
@@ -193,6 +195,22 @@ func TestInstallRefusesBadDownloads(t *testing.T) {
 				t.Fatal("寫到外面了")
 			}
 		})
+	}
+}
+
+func TestRootedPaths(t *testing.T) {
+	for _, name := range []string{"/etc/passwd", `\Windows\evil`, "/"} {
+		if !rooted(name) {
+			t.Fatalf("%q 要算從根目錄開始", name)
+		}
+	}
+	for _, name := range []string{"bin/ollama", "libcudart.so.12.8.90", "../lib/x"} {
+		if rooted(name) {
+			t.Fatalf("%q 是相對路徑", name)
+		}
+	}
+	if runtime.GOOS == "windows" && !rooted(`C:\evil`) {
+		t.Fatal("Windows 上 C:\\evil 要算絕對路徑")
 	}
 }
 

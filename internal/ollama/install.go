@@ -323,11 +323,16 @@ func extract(archive, dest string) error {
 	return extractTar(z, dest)
 }
 
+// rooted 絕對路徑，或從根目錄開始的路徑：Windows 上 /etc/passwd、\x 不算 IsAbs，但會指到磁碟的根目錄
+func rooted(name string) bool {
+	return filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) || filepath.VolumeName(name) != ""
+}
+
 // inside 檔案路徑要在目的地裡面（擋掉 ../ 這種）
 func inside(dest, name string) (string, error) {
 	p := filepath.Join(dest, filepath.FromSlash(name))
 	rel, err := filepath.Rel(dest, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(filepath.FromSlash(name)) {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rooted(name) {
 		return "", fmt.Errorf("unsafe path in archive: %s", name)
 	}
 	return p, nil
@@ -358,7 +363,7 @@ func extractTar(r io.Reader, dest string) error {
 			}
 		case tar.TypeSymlink:
 			// 函式庫的版本連結（libcudart.so.12 → libcudart.so.12.8.90），只接受指到裡面的
-			if filepath.IsAbs(hd.Linkname) {
+			if rooted(hd.Linkname) {
 				return fmt.Errorf("unsafe link in archive: %s", hd.Name)
 			}
 			if _, err := inside(dest, filepath.ToSlash(filepath.Join(filepath.Dir(hd.Name), hd.Linkname))); err != nil {
