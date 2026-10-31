@@ -6,6 +6,23 @@
 
 > **Local AI Helper** is a small desktop program (Go, Windows and Linux) that lets phones running the [Local AI](https://github.com/yu-ken0207/local-chat) app use the AI models on this computer. Pair a phone by scanning a QR code; the helper then forwards chats to Ollama, LM Studio or any OpenAI-compatible server and merges their model lists. It can install Ollama in one click (checked against the official checksums, no admin rights), keeps the computer awake while the phone is using it, and helps open the firewall. Each phone gets its own token (only a hash is stored), and the admin page only listens on localhost.
 
+## 怎麼開始
+
+目前沒有放編好的執行檔（還沒有程式碼簽章，防毒軟體可能誤判），要自己編：
+
+1. 裝 [Go](https://go.dev/dl/)（版本見 `go.mod`）
+2. 下載並執行：
+   ```bash
+   git clone https://github.com/yu-ken0207/local-ai-helper.git
+   cd local-ai-helper
+   go run ./cmd/local-ai-helper
+   ```
+   也可以用 `scripts/build.sh` 編出 Windows 與 Linux 的執行檔（放在 `dist/`），之後點兩下就能打開。
+3. 瀏覽器會打開管理頁（`http://127.0.0.1:11481`）。電腦上還沒有 Ollama 的話，按「安裝 Ollama」。
+4. 在管理頁按「配對新手機」，手機打開 [Local AI](https://github.com/yu-ken0207/local-chat) 掃畫面上的 QR code。手機和電腦要在同一個 Wi-Fi，或兩邊都開 Tailscale。
+
+沒有桌面的 Linux：`go run ./cmd/local-ai-helper --no-browser --no-tray`，管理頁用 SSH 轉接 11481 來看。
+
 ## 使用者看到的
 
 - 點兩下打開：瀏覽器跳出「Local AI 小幫手」管理頁（只有這台電腦看得到），系統匣有圖示可以再打開或結束
