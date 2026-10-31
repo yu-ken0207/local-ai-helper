@@ -2,6 +2,8 @@
 
 裝在家裡電腦上的小程式，讓全家的手機（Local AI App，[local-chat](https://github.com/yu-ken0207/local-chat)）用這台電腦上的 AI 模型，不用付錢買雲端。支援 Windows 與 Linux。
 
+> **Local AI Helper** is a small desktop program (Go, Windows and Linux) that lets phones running the [Local AI](https://github.com/yu-ken0207/local-chat) app use the AI models on this computer. Pair a phone by scanning a QR code; the helper then forwards chats to Ollama, LM Studio or any OpenAI-compatible server and merges their model lists. It can install Ollama in one click (checked against the official checksums, no admin rights), keeps the computer awake while the phone is using it, and helps open the firewall. Each phone gets its own token (only a hash is stored), and the admin page only listens on localhost.
+
 ## 使用者看到的
 
 - 點兩下打開：瀏覽器跳出「Local AI 小幫手」管理頁（只有這台電腦看得到），系統匣有圖示可以再打開或結束
