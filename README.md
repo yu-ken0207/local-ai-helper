@@ -104,3 +104,7 @@ internal/tray/         系統匣圖示
 - **精簡的 Linux 沒有根憑證時，Ollama 自己下載模型會失敗**（小幫手有內建的一份，Ollama 沒有）；一般桌面系統都有，裝 `ca-certificates` 後在管理頁重開 Ollama 就好。
 
 - **沒有程式碼簽章，防毒軟體可能把執行檔當成可疑程式刪掉**（裝了企業防毒的電腦就刪過測試版）。要給一般人用之前要處理：簽章、送防毒廠商誤判審查。
+
+## License
+
+Apache-2.0，見 [LICENSE](LICENSE)。用到的第三方套件（fyne.io/systray、klauspost/compress、skip2/go-qrcode、golang.org/x/sys、golang.org/x/crypto、godbus/dbus）都是 Apache-2.0、MIT 或 BSD 授權。
