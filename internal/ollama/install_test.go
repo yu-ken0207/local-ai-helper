@@ -129,7 +129,8 @@ func TestInstallLinux(t *testing.T) {
 	if in.Binary() != filepath.Join(dir, "bin", "ollama") {
 		t.Fatalf("找不到執行檔：%q", in.Binary())
 	}
-	if st, _ := os.Stat(in.Binary()); st.Mode()&0o100 == 0 {
+	// Windows 沒有「可以執行」的權限位元，只在其他系統檢查
+	if st, _ := os.Stat(in.Binary()); runtime.GOOS != "windows" && st.Mode()&0o100 == 0 {
 		t.Fatal("執行檔要可以執行")
 	}
 	if target, _ := os.Readlink(filepath.Join(dir, "lib/ollama/libcudart.so.12")); target != "libcudart.so.12.8.90" {
